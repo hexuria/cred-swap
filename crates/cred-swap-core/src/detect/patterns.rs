@@ -201,6 +201,49 @@ fn is_random_enough(value: &str) -> bool {
     validate::looks_random(value)
 }
 
+fn is_valid_sin(value: &str) -> bool {
+    validate::canadian_sin(value)
+}
+
+fn is_valid_cpf(value: &str) -> bool {
+    validate::cpf(value)
+}
+
+fn is_valid_abn(value: &str) -> bool {
+    validate::abn(value)
+}
+
+fn is_valid_nric(value: &str) -> bool {
+    validate::nric(value)
+}
+
+fn is_valid_aadhaar(value: &str) -> bool {
+    let digits = value.bytes().filter(u8::is_ascii_digit).count();
+    digits == 12 && validate::verhoeff(value)
+}
+
+/// Prefix pairs the National Insurance office never issues.
+const NINO_NEVER_ISSUED: &[&[u8; 2]] = &[b"BG", b"GB", b"NK", b"KN", b"TN", b"NT", b"ZZ"];
+
+/// A UK National Insurance number the office would actually issue.
+///
+/// The prefix rules are what make this precise: several letter pairs are
+/// administrative and never issued, and without excluding them the pattern
+/// matches ordinary six-digit references with letters either side.
+fn is_issuable_nino(value: &str) -> bool {
+    let compact: Vec<u8> = value
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .map(|b| b.to_ascii_uppercase())
+        .collect();
+    if compact.len() != 9 {
+        return false;
+    }
+    NINO_NEVER_ISSUED
+        .iter()
+        .all(|pair| pair.as_slice() != &compact[..2])
+}
+
 /// Build the rule table. Called once, behind [`RULES`].
 ///
 /// A malformed pattern here is a bug in this file, not a runtime condition, so
@@ -263,6 +306,22 @@ fn build() -> Vec<Rule> {
         rule(
             EntityKind::AwsSecretAccessKey,
             r#"(?i)aws_?secret_?access_?key\s*[:=]\s*["']?([A-Za-z0-9/+=]{40})"#,
+            1,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::AwsSecretAccessKey,
+            r#"(?i)aws_?session_?token\s*[:=]\s*["']?([A-Za-z0-9/+=]{100,})"#,
+            1,
+            None,
+            true,
+        ),
+        rule(
+            // The id on its own is twelve bare digits, which is a quantity as
+            // often as it is an account, so it needs the word beside it.
+            EntityKind::AwsAccessKeyId,
+            r"(?i)\baws[ _\-]?account(?:[ _\-]?id)?\b\s*[:=#]?\s*(\d{12})\b",
             1,
             None,
             true,
@@ -390,6 +449,172 @@ fn build() -> Vec<Rule> {
             r#"(?i)(?:password|passwd|pwd|passphrase)\b["']?\s*[:=]>?\s*["']?([^\s"'`,;]{6,})"#,
             1,
             Some(is_real_secret),
+            true,
+        ),
+        // ---------------------------------------------------------------
+        // The long tail of vendor tokens. Each prefix is unambiguous, so
+        // these need no keyword and no entropy check.
+        // ---------------------------------------------------------------
+        rule(
+            EntityKind::VendorApiToken,
+            concat!(
+                // Model providers.
+                r"\bgsk_[A-Za-z0-9]{40,}\b",
+                r"|\bfw_[A-Za-z0-9]{24,}\b",
+                r"|\bhf_[A-Za-z0-9]{30,}\b",
+                r"|\br8_[A-Za-z0-9]{35,}\b",
+                r"|\bpplx-[A-Za-z0-9]{30,}\b",
+                r"|\bxai-[A-Za-z0-9]{70,}\b",
+                r"|\bnvapi-[A-Za-z0-9_\-]{60,}\b",
+                r"|\bsk-or-v1-[a-f0-9]{60,}\b",
+            ),
+            0,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::VendorApiToken,
+            concat!(
+                // Cloud and infrastructure.
+                r"\bdo[oprt]_v1_[a-f0-9]{60,}\b",
+                r"|\bdapi[a-f0-9]{32}\b",
+                r"|\bsbp_[a-f0-9]{40}\b",
+                r"|\bdckr_pat_[A-Za-z0-9_\-]{25,}\b",
+                r"|\bglsa_[A-Za-z0-9]{32}_[a-f0-9]{8}\b",
+                r"|\bdp\.pt\.[A-Za-z0-9]{40,}\b",
+                r"|\b[a-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{60,}\b",
+            ),
+            0,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::VendorApiToken,
+            concat!(
+                // Commerce and payments.
+                r"\bshp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}\b",
+                r"|\bsq0(?:atp|csp)-[A-Za-z0-9_\-]{20,}\b",
+                r"|\bkey-[a-f0-9]{32}\b",
+                r"|\b[a-f0-9]{32}-us\d{1,2}\b",
+            ),
+            0,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::VendorApiToken,
+            concat!(
+                // Developer tools and observability.
+                r"\bsntrys_[A-Za-z0-9_=+/]{40,}\b",
+                r"|\bNRAK-[A-Z0-9]{25,}\b",
+                r"|\blin_api_[A-Za-z0-9]{35,}\b",
+                r"|\bntn_[A-Za-z0-9]{35,}\b",
+                r"|\bfigd_[A-Za-z0-9_\-]{35,}\b",
+                r"|\bATATT3[A-Za-z0-9_\-=]{100,}\b",
+                r"|\brubygems_[a-f0-9]{48}\b",
+                r"|\bcio[A-Za-z0-9]{32}\b",
+                r"|\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_\-]{50,}\b",
+                r"|\bpat[A-Za-z0-9]{14}\.[a-f0-9]{64}\b",
+            ),
+            0,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::VendorApiToken,
+            concat!(
+                // Google's own two shapes, and the chat platforms.
+                r"\bGOCSPX-[A-Za-z0-9_\-]{28}\b",
+                r"|\b\d{10,}-[a-z0-9]{32}\.apps\.googleusercontent\.com\b",
+                r"|\b[MNO][A-Za-z0-9_\-]{23,25}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27,}\b",
+                r"|\b\d{8,10}:AA[A-Za-z0-9_\-]{32,}\b",
+            ),
+            0,
+            None,
+            true,
+        ),
+        // ---------------------------------------------------------------
+        // Taxpayer and national identifiers.
+        // ---------------------------------------------------------------
+        rule(
+            // Philippine TIN, which carries a branch code: 000-000-000-00000.
+            EntityKind::TaxId,
+            r"\b\d{3}-\d{3}-\d{3}-\d{3,5}\b",
+            0,
+            None,
+            true,
+        ),
+        rule(
+            // The bare nine-digit form is also a Canadian SIN and half a phone
+            // number, so it needs the word next to it.
+            EntityKind::TaxId,
+            r"(?i)\b(?:tin|t\.i\.n\.|tax[ _\-]?(?:id|identification)(?:[ _\-]?(?:no|number|#))?)\b\s*[:#=]?\s*(\d{3}-?\d{3}-?\d{3}(?:-?\d{3,5})?)\b",
+            1,
+            None,
+            true,
+        ),
+        rule(
+            // A US ITIN: always 9xx, with the group in the ranges the IRS uses.
+            EntityKind::TaxId,
+            r"\b9\d{2}-(?:5\d|6[0-5]|7\d|8[0-8]|9[0-24-9])-\d{4}\b",
+            0,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::TaxId,
+            r"\b\d{3}\.\d{3}\.\d{3}-\d{2}\b",
+            0,
+            Some(is_valid_cpf),
+            true,
+        ),
+        rule(
+            EntityKind::TaxId,
+            r"(?i)\b(?:abn|australian business number)\b\s*[:#=]?\s*(\d{2}\s?\d{3}\s?\d{3}\s?\d{3})\b",
+            1,
+            Some(is_valid_abn),
+            true,
+        ),
+        rule(
+            EntityKind::TaxId,
+            r"(?i)\b(?:pan|permanent account number)\b\s*[:#=]?\s*([A-Z]{5}\d{4}[A-Z])\b",
+            1,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::TaxId,
+            r"(?i)\bvat(?:[ _\-]?(?:no|number|id|reg))?\b\s*[:#=]?\s*((?:AT|BE|BG|CY|CZ|DE|DK|EE|EL|ES|FI|FR|GB|HR|HU|IE|IT|LT|LU|LV|MT|NL|PL|PT|RO|SE|SI|SK)[A-Z0-9]{8,12})\b",
+            1,
+            None,
+            true,
+        ),
+        rule(
+            EntityKind::NationalId,
+            r"\b[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b",
+            0,
+            Some(is_issuable_nino),
+            true,
+        ),
+        rule(
+            EntityKind::NationalId,
+            r"\b[STFG]\d{7}[A-Z]\b",
+            0,
+            Some(is_valid_nric),
+            true,
+        ),
+        rule(
+            EntityKind::NationalId,
+            r"(?i)\b(?:sin|social insurance(?:[ _\-]?number)?)\b\s*[:#=]?\s*(\d{3}[- ]?\d{3}[- ]?\d{3})\b",
+            1,
+            Some(is_valid_sin),
+            true,
+        ),
+        rule(
+            EntityKind::NationalId,
+            r"(?i)\b(?:aadhaar|aadhar|uidai)\b\s*[:#=]?\s*(\d{4}\s?\d{4}\s?\d{4})\b",
+            1,
+            Some(is_valid_aadhaar),
             true,
         ),
         // ---------------------------------------------------------------
@@ -690,6 +915,284 @@ mod tests {
             )
             .is_some()
         );
+    }
+
+    /// Build a token from parts, so no credential-shaped literal sits in the
+    /// source. See `crate::fixtures` for why.
+    fn tok(prefix: &str, body: &str, times: usize) -> String {
+        format!("{prefix}{}", body.repeat(times))
+    }
+
+    #[test]
+    fn vendor_tokens_are_recognised_by_their_prefix() {
+        let cases: Vec<(String, &str)> = vec![
+            (tok(concat!("gsk", "_"), "a", 52), "Groq"),
+            (tok(concat!("hf", "_"), "b", 34), "Hugging Face"),
+            (tok(concat!("r8", "_"), "c", 37), "Replicate"),
+            (tok(concat!("pplx", "-"), "d", 32), "Perplexity"),
+            (tok(concat!("xai", "-"), "e", 80), "xAI"),
+            (tok(concat!("sk-or-", "v1-"), "f", 64), "OpenRouter"),
+            (tok(concat!("dop", "_v1_"), "0", 64), "DigitalOcean"),
+            (tok("dapi", "a", 32), "Databricks"),
+            (tok(concat!("sbp", "_"), "1", 40), "Supabase"),
+            (tok(concat!("shpat", "_"), "9", 32), "Shopify"),
+            (tok(concat!("sntrys", "_"), "g", 50), "Sentry"),
+            (tok(concat!("NRAK", "-"), "H", 27), "New Relic"),
+            (tok(concat!("lin_api", "_"), "h", 40), "Linear"),
+            (tok(concat!("ntn", "_"), "i", 40), "Notion"),
+            (tok(concat!("figd", "_"), "j", 40), "Figma"),
+            (tok(concat!("dckr_pat", "_"), "k", 30), "Docker Hub"),
+            (tok(concat!("rubygems", "_"), "2", 48), "RubyGems"),
+            (tok("cio", "l", 32), "crates.io"),
+            (tok(concat!("GOCSPX", "-"), "m", 28), "Google OAuth"),
+            (tok(concat!("dp.pt", "."), "n", 44), "Doppler"),
+        ];
+
+        for (value, vendor) in cases {
+            assert!(
+                capture(&EntityKind::VendorApiToken, &value).is_some(),
+                "{vendor} token was not recognised"
+            );
+        }
+    }
+
+    /// Every rule the whole table would apply, the way a real scrub does.
+    ///
+    /// The per-kind `capture` helper asks one rule in isolation, so it cannot
+    /// see two rules claiming the same span. That is how an `OpenRouter` token
+    /// came to be reported as an `OpenAI` key: both matched, both at the same
+    /// precedence, and declaration order quietly decided.
+    fn scanned(text: &str) -> Vec<EntityKind> {
+        use crate::detect::Detector;
+        use crate::policy::Policy;
+
+        Detector::new(Policy::aggressive())
+            .expect("the aggressive policy compiles")
+            .scan(text)
+            .into_iter()
+            .map(|finding| finding.kind)
+            .collect()
+    }
+
+    #[test]
+    fn a_prefixed_vendor_token_is_not_claimed_by_a_broader_rule() {
+        // `sk-or-v1-...` is also a valid `sk-...`, so the generic OpenAI rule
+        // matches the identical span. The more specific rule has to win.
+        let openrouter = tok(concat!("sk-or-", "v1-"), "a", 64);
+        assert_eq!(
+            scanned(&openrouter),
+            vec![EntityKind::VendorApiToken],
+            "a vendor token was claimed by a broader rule"
+        );
+
+        // And the two neighbours it sits between still resolve correctly.
+        assert_eq!(
+            scanned(&fixtures::anthropic_key()),
+            vec![EntityKind::AnthropicKey]
+        );
+        assert_eq!(
+            scanned(&fixtures::openai_key()),
+            vec![EntityKind::OpenAiKey]
+        );
+    }
+
+    #[test]
+    fn aws_has_the_shapes_beyond_the_access_key() {
+        assert!(
+            capture(
+                &EntityKind::AwsSecretAccessKey,
+                &format!("aws_session_token = {}", "A".repeat(120))
+            )
+            .is_some()
+        );
+        assert_eq!(
+            capture(&EntityKind::AwsAccessKeyId, "aws_account_id: 123456789012").as_deref(),
+            Some("123456789012")
+        );
+        // Twelve bare digits are a quantity far more often than an account.
+        assert!(
+            capture(
+                &EntityKind::AwsAccessKeyId,
+                "we processed 123456789012 rows"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_remaining_vendor_prefixes_are_recognised() {
+        let cases: Vec<(String, &str)> = vec![
+            (tok(concat!("key", "-"), "a", 32), "Mailgun"),
+            (format!("{}-us12", "b".repeat(32)), "Mailchimp"),
+            (tok(concat!("sq0atp", "-"), "c", 22), "Square"),
+            (tok(concat!("glsa", "_"), "d", 32) + "_abcdef01", "Grafana"),
+            (
+                format!("{}.atlasv1.{}", "e".repeat(14), "f".repeat(64)),
+                "Terraform Cloud",
+            ),
+            (tok(concat!("ATATT", "3"), "g", 120), "Atlassian"),
+            (tok(concat!("pypi-AgEIcHlwaS5", "vcmc"), "h", 60), "PyPI"),
+            (
+                format!("pat{}.{}", "i".repeat(14), "0".repeat(64)),
+                "Airtable",
+            ),
+            (
+                format!(
+                    "{}.{}.{}",
+                    "M".to_string() + &"j".repeat(24),
+                    "k".repeat(6),
+                    "l".repeat(30)
+                ),
+                "Discord",
+            ),
+            (format!("123456789:AA{}", "m".repeat(33)), "Telegram"),
+            (
+                format!(
+                    "{}-{}.apps.googleusercontent.com",
+                    "1".repeat(12),
+                    "n".repeat(32)
+                ),
+                "Google OAuth client",
+            ),
+            (tok(concat!("nvapi", "-"), "o", 64), "NVIDIA"),
+            (tok(concat!("fw", "_"), "p", 26), "Fireworks"),
+        ];
+        for (value, vendor) in cases {
+            assert!(
+                capture(&EntityKind::VendorApiToken, &value).is_some(),
+                "{vendor} token was not recognised: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_hash_is_not_mistaken_for_a_vendor_token() {
+        // The riskiest new shapes are bare hex. A commit SHA, an md5 and a
+        // content hash all live in ordinary logs and must not fire.
+        for line in [
+            "commit 0e5c3b1a9f4d2e8c7b6a5f4e3d2c1b0a9f8e7d6c",
+            "md5 d41d8cd98f00b204e9800998ecf8427e",
+            "integrity sha256-47DEQpj8HBSaTImW1jbXbdcB9wLpvhxaEr5r",
+            "the cache key is stale",
+        ] {
+            assert!(
+                capture(&EntityKind::VendorApiToken, line).is_none(),
+                "fired on: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_aadhaar_with_a_valid_checksum_is_caught() {
+        // 2345 6789 0123 fails Verhoeff, so an earlier negative-only test
+        // passed for a reason that had nothing to do with the keyword gate.
+        assert_eq!(
+            capture(&EntityKind::NationalId, "aadhaar 2994 1234 5678").as_deref(),
+            Some("2994 1234 5678")
+        );
+        // A wrong check digit is refused.
+        assert!(capture(&EntityKind::NationalId, "aadhaar 2994 1234 5679").is_none());
+        // And the keyword really is required.
+        assert!(capture(&EntityKind::NationalId, "batch 2994 1234 5678 shipped").is_none());
+    }
+
+    #[test]
+    fn an_itin_covers_every_group_the_irs_issues() {
+        for group in ["50", "65", "70", "88", "90", "92", "94", "99"] {
+            let value = format!("912-{group}-1234");
+            assert!(
+                capture(&EntityKind::TaxId, &value).is_some(),
+                "{value} is an issued ITIN group"
+            );
+        }
+        for group in ["49", "66", "89", "93"] {
+            let value = format!("912-{group}-1234");
+            assert!(
+                capture(&EntityKind::TaxId, &value).is_none(),
+                "{value} is not an issued ITIN group"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_words_are_not_vendor_tokens() {
+        for line in [
+            "let key = compute_key(input);",
+            "the patch is ready for review",
+            "cio is the crates.io registry",
+            "dapi returns a handle",
+            "https://example.com/path/to/a/page",
+        ] {
+            assert!(
+                capture(&EntityKind::VendorApiToken, line).is_none(),
+                "fired on: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_philippine_tin_is_recognised_with_and_without_its_branch_code() {
+        assert_eq!(
+            capture(&EntityKind::TaxId, "TIN 123-456-789-00001").as_deref(),
+            Some("123-456-789-00001")
+        );
+        assert_eq!(
+            capture(&EntityKind::TaxId, "tax id: 123-456-789").as_deref(),
+            Some("123-456-789")
+        );
+        // The bare nine-digit form needs the word, or it matches half the
+        // reference numbers in any document.
+        assert!(capture(&EntityKind::TaxId, "order 123-456-789 shipped").is_none());
+    }
+
+    #[test]
+    fn an_itin_is_told_apart_from_a_social_security_number() {
+        // 9xx is never an SSN and always an ITIN.
+        assert!(capture(&EntityKind::TaxId, "itin 912-78-1234").is_some());
+        assert!(capture(&EntityKind::NationalId, "ssn 912-78-1234").is_none());
+        // And the reverse.
+        assert!(capture(&EntityKind::NationalId, "ssn 123-45-6789").is_some());
+        assert!(capture(&EntityKind::TaxId, "123-45-6789").is_none());
+    }
+
+    #[test]
+    fn checksummed_identifiers_need_their_checksum() {
+        assert!(capture(&EntityKind::TaxId, "cpf 529.982.247-25").is_some());
+        assert!(capture(&EntityKind::TaxId, "cpf 529.982.247-26").is_none());
+
+        assert!(capture(&EntityKind::TaxId, "ABN 51 824 753 556").is_some());
+        assert!(capture(&EntityKind::TaxId, "ABN 51 824 753 557").is_none());
+
+        assert!(capture(&EntityKind::NationalId, "NRIC S1234567D").is_some());
+        assert!(capture(&EntityKind::NationalId, "NRIC S1234567A").is_none());
+
+        assert!(capture(&EntityKind::NationalId, "SIN: 046 454 286").is_some());
+        assert!(capture(&EntityKind::NationalId, "SIN: 046 454 287").is_none());
+    }
+
+    #[test]
+    fn a_nino_excludes_the_prefixes_that_are_never_issued() {
+        // D, F, I, Q, U and V are never used as prefix letters, so the pattern
+        // excludes them; AB is an ordinary issued prefix.
+        assert!(capture(&EntityKind::NationalId, "NI AB 12 34 56 C").is_some());
+        assert!(capture(&EntityKind::NationalId, "QQ 12 34 56 C").is_none());
+        for never in ["BG123456C", "GB123456C", "NK123456C", "ZZ123456C"] {
+            assert!(
+                capture(&EntityKind::NationalId, never).is_none(),
+                "{never} is not issued"
+            );
+        }
+    }
+
+    #[test]
+    fn keyword_gated_identifiers_need_their_keyword() {
+        assert!(capture(&EntityKind::TaxId, "PAN ABCDE1234F").is_some());
+        assert!(capture(&EntityKind::TaxId, "ABCDE1234F").is_none());
+
+        assert!(capture(&EntityKind::TaxId, "VAT no GB123456789").is_some());
+        assert!(capture(&EntityKind::TaxId, "GB123456789").is_none());
+
+        // Aadhaar's own gate is covered by `an_aadhaar_with_a_valid_checksum_is_caught`.
     }
 
     #[test]

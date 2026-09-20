@@ -11,8 +11,22 @@
 /// 12..=19 digit range used by real card schemes is rejected.
 #[must_use]
 pub fn luhn(candidate: &str) -> bool {
+    luhn_of_length(candidate, 12..=19)
+}
+
+/// Verify a Canadian Social Insurance Number: nine digits, Luhn checked.
+#[must_use]
+pub fn canadian_sin(candidate: &str) -> bool {
+    luhn_of_length(candidate, 9..=9)
+}
+
+/// Luhn over a number whose length belongs to some scheme other than a card.
+///
+/// Private because the length range is the whole decision: exposing it would
+/// invite a caller to pass a range admitting a number the scheme never uses.
+fn luhn_of_length(candidate: &str, lengths: std::ops::RangeInclusive<usize>) -> bool {
     let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
-    if !(12..=19).contains(&digits.len()) {
+    if !lengths.contains(&digits.len()) {
         return false;
     }
     let sum: u32 = digits
@@ -166,6 +180,147 @@ pub fn parse_ipv4(candidate: &str) -> Option<[u8; 4]> {
     Some(octets)
 }
 
+/// Verify a Brazilian CPF against its two mod-11 check digits.
+#[must_use]
+pub fn cpf(candidate: &str) -> bool {
+    let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
+    if digits.len() != 11 {
+        return false;
+    }
+    // A CPF of eleven identical digits satisfies the arithmetic but is never
+    // issued, and these are exactly the values people type as filler.
+    if digits.iter().all(|digit| *digit == digits[0]) {
+        return false;
+    }
+
+    let (first, second) = cpf_check_digits(&digits);
+    digits[9] == first && digits[10] == second
+}
+
+/// The two mod-11 check digits a Brazilian CPF body requires.
+///
+/// Shared by the validator and the generator. Two copies of this loop is two
+/// chances for a generated stand-in to fail the very check its own validator
+/// applies, and nothing else would catch that.
+#[must_use]
+pub fn cpf_check_digits(body: &[u32]) -> (u32, u32) {
+    let mut digits: Vec<u32> = body.iter().copied().take(9).collect();
+    for length in [9usize, 10] {
+        let sum: u32 = digits[..length]
+            .iter()
+            .enumerate()
+            .map(|(index, digit)| digit * u32::try_from(length + 1 - index).unwrap_or(0))
+            .sum();
+        let remainder = sum % 11;
+        digits.push(if remainder < 2 { 0 } else { 11 - remainder });
+    }
+    (digits[9], digits[10])
+}
+
+/// The positional weights an ABN checksum uses.
+const ABN_WEIGHTS: [u32; 11] = [10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19];
+
+/// Verify an Australian Business Number against its mod-89 checksum.
+#[must_use]
+pub fn abn(candidate: &str) -> bool {
+    let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
+    if digits.len() != 11 || digits[0] == 0 {
+        return false;
+    }
+    let sum: u32 = digits
+        .iter()
+        .zip(ABN_WEIGHTS)
+        .enumerate()
+        // The first digit has one subtracted before weighting.
+        .map(|(index, (digit, weight))| if index == 0 { digit - 1 } else { *digit } * weight)
+        .sum();
+    sum.is_multiple_of(89)
+}
+
+/// The positional weights an NRIC check letter uses.
+const NRIC_WEIGHTS: [u32; 7] = [2, 7, 6, 5, 4, 3, 2];
+
+/// Verify a Singapore NRIC or FIN against its weighted check letter.
+#[must_use]
+pub fn nric(candidate: &str) -> bool {
+    let bytes: Vec<u8> = candidate.bytes().map(|b| b.to_ascii_uppercase()).collect();
+    if bytes.len() != 9 {
+        return false;
+    }
+    let prefix = bytes[0];
+    // S, T, F and G only. The M series uses a different check table and a
+    // different century offset, and neither could be corroborated well enough
+    // to ship: a wrong table silently accepts and rejects the wrong numbers,
+    // and the structural test that would normally catch a mistake here holds
+    // for any table at all, so it could never have caught one.
+    if !matches!(prefix, b'S' | b'T' | b'F' | b'G') {
+        return false;
+    }
+    if !bytes[1..8].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+
+    let mut sum: u32 = bytes[1..8]
+        .iter()
+        .zip(NRIC_WEIGHTS)
+        .map(|(byte, weight)| u32::from(byte - b'0') * weight)
+        .sum();
+    // The century offset: T and G are the 2000s.
+    if matches!(prefix, b'T' | b'G') {
+        sum += 4;
+    }
+
+    let table: &[u8] = match prefix {
+        b'S' | b'T' => b"JZIHGFEDCBA",
+        _ => b"XWUTRQPNMLK",
+    };
+    let index = usize::try_from(sum % 11).unwrap_or(0);
+    table.get(index).copied() == Some(bytes[8])
+}
+
+/// The Verhoeff dihedral multiplication table.
+const VERHOEFF_D: [[usize; 10]; 10] = [
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
+    [2, 3, 4, 0, 1, 7, 8, 9, 5, 6],
+    [3, 4, 0, 1, 2, 8, 9, 5, 6, 7],
+    [4, 0, 1, 2, 3, 9, 5, 6, 7, 8],
+    [5, 9, 8, 7, 6, 0, 4, 3, 2, 1],
+    [6, 5, 9, 8, 7, 1, 0, 4, 3, 2],
+    [7, 6, 5, 9, 8, 2, 1, 0, 4, 3],
+    [8, 7, 6, 5, 9, 3, 2, 1, 0, 4],
+    [9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+];
+/// The Verhoeff permutation table.
+const VERHOEFF_P: [[usize; 10]; 8] = [
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    [1, 5, 7, 6, 2, 8, 3, 0, 9, 4],
+    [5, 8, 0, 3, 7, 9, 6, 1, 4, 2],
+    [8, 9, 1, 6, 0, 4, 3, 5, 2, 7],
+    [9, 4, 5, 3, 1, 2, 6, 8, 7, 0],
+    [4, 2, 8, 6, 5, 7, 3, 9, 0, 1],
+    [2, 7, 9, 3, 8, 0, 6, 4, 1, 5],
+    [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
+];
+
+/// Verify a number against the Verhoeff checksum, as India's Aadhaar uses.
+#[must_use]
+pub fn verhoeff(candidate: &str) -> bool {
+    let digits: Vec<usize> = candidate
+        .chars()
+        .filter_map(|c| c.to_digit(10))
+        .filter_map(|d| usize::try_from(d).ok())
+        .collect();
+    if digits.is_empty() {
+        return false;
+    }
+    let mut check = 0usize;
+    for (position, digit) in digits.iter().rev().enumerate() {
+        check = VERHOEFF_D[check][VERHOEFF_P[position % 8][*digit]];
+    }
+    check == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +332,15 @@ mod tests {
         assert!(luhn("4111 1111 1111 1111"));
         assert!(luhn("5555-5555-5555-4444"));
         assert!(luhn("378282246310005"));
+    }
+
+    #[test]
+    fn canadian_sin_is_luhn_over_nine_digits() {
+        // A SIN is Luhn checked but far shorter than any card.
+        assert!(canadian_sin("046 454 286"));
+        assert!(!canadian_sin("046 454 287"));
+        assert!(!canadian_sin("4242424242424242"), "a card is not a SIN");
+        assert!(!luhn("046454286"), "nine digits is not a card length");
     }
 
     #[test]
@@ -202,6 +366,54 @@ mod tests {
         assert!(aba_routing("011401533"));
         assert!(!aba_routing("021000022"));
         assert!(!aba_routing("02100002"));
+    }
+
+    #[test]
+    fn cpf_check_digits() {
+        // Published example values.
+        assert!(cpf("529.982.247-25"));
+        assert!(cpf("111.444.777-35"));
+        assert!(!cpf("529.982.247-26"));
+        assert!(!cpf("111.111.111-11"), "a repdigit is never issued");
+        assert!(!cpf("529.982.247"));
+    }
+
+    #[test]
+    fn abn_checksum() {
+        assert!(abn("51 824 753 556"));
+        assert!(abn("53004085616"));
+        assert!(!abn("51 824 753 557"));
+        assert!(!abn("01824753556"), "an ABN never starts with zero");
+    }
+
+    #[test]
+    fn nric_check_letter() {
+        // A published example. The rest is checked as a property rather than
+        // against invented values: for any stem, exactly one of the eleven
+        // check letters can be right, which is what makes the letter useful.
+        assert!(nric("S1234567D"));
+        assert!(!nric("S1234567A"));
+        assert!(!nric("X1234567D"), "X is not an NRIC prefix");
+        assert!(
+            !nric("M1234567X"),
+            "the M series is deliberately not covered"
+        );
+        assert!(!nric("S123456D"), "too short");
+
+        for prefix in ["S", "T", "F", "G"] {
+            let valid = (b'A'..=b'Z')
+                .filter(|letter| nric(&format!("{prefix}1234567{}", char::from(*letter))))
+                .count();
+            assert_eq!(valid, 1, "prefix {prefix} accepted {valid} check letters");
+        }
+    }
+
+    #[test]
+    fn verhoeff_checksum() {
+        assert!(verhoeff("2363"));
+        assert!(verhoeff("123451"));
+        assert!(!verhoeff("2364"));
+        assert!(!verhoeff(""));
     }
 
     #[test]
