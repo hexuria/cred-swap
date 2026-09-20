@@ -42,4 +42,8 @@ allow = [
   'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
   'postgresql://appuser:s3cr3t-p4ssw0rd@db.prod.internal:5432/orders',
   'correct-horse-battery',
+
+  # The same invented log line in the agent-harness example, where the trailing
+  # backslash is the Rust string continuation rather than part of the value.
+  'postgresql://appuser:s3cr3t-p4ssw0rd@db.prod.internal:5432/orders\n\',
 ]
