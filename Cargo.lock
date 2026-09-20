@@ -301,7 +301,6 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "hmac",
- "once_cell",
  "rand 0.9.5",
  "rand_chacha",
  "regex",

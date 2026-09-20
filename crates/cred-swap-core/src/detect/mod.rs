@@ -1,5 +1,6 @@
 //! Finding sensitive spans in text.
 
+pub mod candidates;
 pub mod patterns;
 pub mod validate;
 
@@ -32,9 +33,42 @@ impl Finding {
         self.start..self.end
     }
 
-    fn overlaps(&self, other: &Self) -> bool {
-        self.start < other.end && other.start < self.end
+    pub(crate) const fn span(&self) -> (usize, usize) {
+        (self.start, self.end)
     }
+
+    pub(crate) const fn overlaps(&self, other: &Self) -> bool {
+        spans_overlap(self.span(), other.span())
+    }
+}
+
+/// Whether two half-open byte ranges share a byte.
+///
+/// One definition, because both this module and the candidate survey need it,
+/// and two copies of an off-by-one are two chances to get it wrong in
+/// different directions.
+pub(crate) const fn spans_overlap(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 < right.1 && right.0 < left.1
+}
+
+/// Take items in the order given, skipping any that overlap one already taken.
+///
+/// The caller sorts first: that sort is the policy, and it differs. Findings
+/// rank by how specific the rule was; candidates rank by length alone, because
+/// there is no rule behind them to be specific about. The greedy walk
+/// afterwards is the same either way.
+pub(crate) fn pick_disjoint<T>(ordered: Vec<T>, span: impl Fn(&T) -> (usize, usize)) -> Vec<T> {
+    let mut taken: Vec<T> = Vec::with_capacity(ordered.len());
+    for item in ordered {
+        if taken
+            .iter()
+            .any(|kept| spans_overlap(span(kept), span(&item)))
+        {
+            continue;
+        }
+        taken.push(item);
+    }
+    taken
 }
 
 /// A config file asked for something that could not be compiled.
@@ -235,6 +269,65 @@ fn has_word_boundaries(text: &str, start: usize, end: usize) -> bool {
     !before.is_some_and(is_word) && !after.is_some_and(is_word)
 }
 
+/// Combine findings from more than one source into one ordered, non-overlapping list.
+///
+/// Use it to fold a classifier's verdicts in beside the rules'. Precedence
+/// decides who wins where two claim the same span, so a rule that knows
+/// exactly what it found beats a judgement that something looked personal.
+///
+/// The result is safe to hand to [`crate::Cloak::scrub_findings`].
+#[must_use]
+pub fn merge(rules: Vec<Finding>, judged: Vec<Finding>) -> Merged {
+    // Provenance decides, not the kind table. Precedence ranks how *specific*
+    // a pattern is, which says nothing about whether a guess should override a
+    // match: a judged `Custom` kind outranks `CreditCard` on that table, so
+    // ranking across the two lists would let "this looked like a company name"
+    // win over a number that passed the Luhn check.
+    let settled = resolve_overlaps(rules);
+    let offered = judged.len();
+    let unclaimed: Vec<Finding> = judged
+        .into_iter()
+        .filter(|candidate| !settled.iter().any(|kept| kept.overlaps(candidate)))
+        .collect();
+    let displaced_before = offered - unclaimed.len();
+
+    // Within each list precedence still does the work it is good at.
+    let kept_count = unclaimed.len();
+    let resolved = resolve_overlaps(unclaimed);
+    let displaced = displaced_before + (kept_count - resolved.len());
+
+    let mut findings = settled;
+    findings.extend(resolved);
+    findings.sort_by_key(|finding| finding.start);
+    Merged {
+        findings,
+        displaced,
+    }
+}
+
+/// What [`merge`] decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    /// The findings to scrub, ordered and non-overlapping.
+    pub findings: Vec<Finding>,
+    /// Judged findings dropped because something else already claimed the span.
+    ///
+    /// Reported for the same reason [`crate::Scrubbed::skipped`] is: a caller
+    /// that paid a classifier for a verdict and then sees it vanish has no
+    /// other way to find out. Usually this is correct and uninteresting, but a
+    /// count that climbs means the judge and the rules keep disagreeing about
+    /// the same spans, which is worth knowing.
+    pub displaced: usize,
+}
+
+impl Merged {
+    /// The findings alone, for a caller that does not care what was displaced.
+    #[must_use]
+    pub fn into_findings(self) -> Vec<Finding> {
+        self.findings
+    }
+}
+
 /// Pick a non-overlapping subset of candidates and sort it by position.
 ///
 /// Two rules routinely claim the same span: a vendor key is also a generic
@@ -250,13 +343,7 @@ fn resolve_overlaps(mut candidates: Vec<Finding>) -> Vec<Finding> {
             .then_with(|| a.kind.cmp(&b.kind))
     });
 
-    let mut accepted: Vec<Finding> = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if accepted.iter().any(|kept| kept.overlaps(&candidate)) {
-            continue;
-        }
-        accepted.push(candidate);
-    }
+    let mut accepted = pick_disjoint(candidates, Finding::span);
     accepted.sort_by_key(|finding| finding.start);
     accepted
 }
@@ -366,6 +453,109 @@ mod tests {
         let detector = Detector::new(policy).unwrap();
         let found = detector.scan("see ACME-1234 for context");
         assert_eq!(found[0].kind, EntityKind::Custom("ticket".into()));
+    }
+
+    #[test]
+    fn merging_lets_a_rule_win_over_a_judgement() {
+        let rules = vec![Finding {
+            kind: EntityKind::EmailAddress,
+            start: 5,
+            end: 18,
+            text: "dana@corp.com".into(),
+        }];
+        // A judge that thought the same span was a person's name.
+        let judged = vec![Finding {
+            kind: EntityKind::PersonName,
+            start: 5,
+            end: 18,
+            text: "dana@corp.com".into(),
+        }];
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.findings.len(), 1);
+        assert_eq!(merged.findings[0].kind, EntityKind::EmailAddress);
+        assert_eq!(merged.displaced, 1, "the dropped verdict was not reported");
+    }
+
+    #[test]
+    fn a_rule_wins_even_when_the_judged_kind_outranks_it() {
+        // `Custom` sits at 80 on the precedence table and `CreditCard` at 70,
+        // so ranking the two lists together would let a guess beat a number
+        // that passed its check digit. It is the provenance that decides.
+        let rules = vec![Finding {
+            kind: EntityKind::CreditCard,
+            start: 6,
+            end: 25,
+            text: "4242 4242 4242 4242".into(),
+        }];
+        let judged = vec![Finding {
+            kind: EntityKind::Custom("organisation".into()),
+            start: 6,
+            end: 25,
+            text: "4242 4242 4242 4242".into(),
+        }];
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.findings.len(), 1);
+        assert_eq!(merged.findings[0].kind, EntityKind::CreditCard);
+        assert_eq!(merged.displaced, 1);
+    }
+
+    #[test]
+    fn judged_findings_still_resolve_against_each_other() {
+        let judged = vec![
+            Finding {
+                kind: EntityKind::PersonName,
+                start: 0,
+                end: 14,
+                text: "Avery Sinclair".into(),
+            },
+            Finding {
+                kind: EntityKind::Custom("organisation".into()),
+                start: 6,
+                end: 14,
+                text: "Sinclair".into(),
+            },
+        ];
+
+        let merged = merge(Vec::new(), judged);
+        assert_eq!(
+            merged.findings.len(),
+            1,
+            "two judged spans overlapped in the output"
+        );
+        assert_eq!(
+            merged.findings[0].kind,
+            EntityKind::Custom("organisation".into())
+        );
+        assert_eq!(
+            merged.displaced, 1,
+            "the judged span it lost to went unreported"
+        );
+    }
+
+    #[test]
+    fn merging_keeps_both_when_they_do_not_collide() {
+        let rules = vec![Finding {
+            kind: EntityKind::EmailAddress,
+            start: 0,
+            end: 13,
+            text: "dana@corp.com".into(),
+        }];
+        let judged = vec![Finding {
+            kind: EntityKind::PersonName,
+            start: 20,
+            end: 34,
+            text: "Avery Sinclair".into(),
+        }];
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.findings.len(), 2);
+        assert_eq!(merged.displaced, 0);
+        assert!(
+            merged.findings[0].start < merged.findings[1].start,
+            "not in document order"
+        );
     }
 
     #[test]

@@ -41,6 +41,13 @@ pub struct Scrubbed {
     pub replacements: Vec<Replacement>,
     /// Findings the caller chose to leave in place.
     pub kept: Vec<Finding>,
+    /// Findings dropped because they overlapped one already applied.
+    ///
+    /// Always empty for [`Cloak::scrub`] and [`Cloak::scrub_with`], whose
+    /// findings come from the detector and cannot overlap. Non-empty only when
+    /// a caller hands [`Cloak::scrub_findings`] a list that does, and then it
+    /// is the answer to "why is that still in the text".
+    pub skipped: Vec<Finding>,
 }
 
 impl Scrubbed {
@@ -133,24 +140,41 @@ impl Cloak {
     /// address would be detected as an email address and replaced by a second
     /// stand-in on the next turn, and a third on the turn after, until nothing
     /// could be restored and the model lost track of who it was talking about.
-    pub fn scrub_with(
+    pub fn scrub_with(&mut self, text: &str, decide: impl FnMut(&Finding) -> Decision) -> Scrubbed {
+        let findings = self.detector.scan(text);
+        debug_assert!(
+            findings.windows(2).all(|pair| pair[0].end <= pair[1].start),
+            "the detector returned overlapping or unordered spans"
+        );
+        self.apply(text, findings, decide)
+    }
+
+    /// Rewrite `text` according to `findings`, which must be ordered and
+    /// non-overlapping.
+    fn apply(
         &mut self,
         text: &str,
+        findings: Vec<Finding>,
         mut decide: impl FnMut(&Finding) -> Decision,
     ) -> Scrubbed {
-        let findings = self.detector.scan(text);
         let mut out = String::with_capacity(text.len());
         let mut replacements = Vec::new();
         let mut kept = Vec::new();
+        let mut skipped = Vec::new();
         let mut cursor = 0usize;
 
         for finding in findings {
-            // Findings from `scan` never overlap, so a monotonic cursor is
-            // enough and no offset arithmetic is needed.
-            debug_assert!(
-                finding.start >= cursor,
-                "detector returned overlapping spans"
-            );
+            // A monotonic cursor is all this needs, so a span that starts
+            // behind the cursor is dropped rather than sliced backwards. There
+            // is no assertion here on purpose: `scrub_findings` takes a list
+            // the caller assembled, where an overlap is bad input rather than
+            // a broken invariant, and panicking half way through a rewrite
+            // leaves them unable to tell how much was already replaced. The
+            // invariant is asserted in `scrub_with`, where it really is one.
+            if finding.start < cursor {
+                skipped.push(finding);
+                continue;
+            }
             out.push_str(&text[cursor..finding.start]);
             cursor = finding.end;
 
@@ -183,7 +207,32 @@ impl Cloak {
             text: out,
             replacements,
             kept,
+            skipped,
         }
+    }
+
+    /// Scrub using a finding list the caller assembled.
+    ///
+    /// This is the seam for anything the rules cannot do on their own. Take
+    /// [`Cloak::inspect`], put the spans a judge should see through
+    /// [`candidates`], fold the verdicts back in with [`merge`], and hand the
+    /// result here. The vault, the stand-ins and the restore path are the same
+    /// ones the rules use, so a judged finding restores exactly like any other.
+    ///
+    /// `findings` should not overlap and should be in document order, which is
+    /// what [`merge`] guarantees. A span that overlaps one already applied is
+    /// dropped and reported in [`Scrubbed::skipped`], rather than panicking
+    /// half way through a rewrite the caller cannot then inspect.
+    ///
+    /// [`candidates`]: crate::detect::candidates::candidates
+    /// [`merge`]: crate::detect::merge
+    pub fn scrub_findings(
+        &mut self,
+        text: &str,
+        findings: Vec<Finding>,
+        decide: impl FnMut(&Finding) -> Decision,
+    ) -> Scrubbed {
+        self.apply(text, findings, decide)
     }
 
     /// Put the real values back wherever a stand-in appears.
@@ -365,6 +414,94 @@ mod tests {
         let restored = cloak.restore(&transcript);
         assert_eq!(restored.matches("dana@corp.com").count(), 5);
         assert_eq!(cloak.vault().len(), 1);
+    }
+
+    #[test]
+    fn overlapping_findings_are_skipped_rather_than_panicking() {
+        let mut cloak = cloak();
+        let text = "contact dana@corp.com now";
+
+        // What a caller assembling their own list can produce: a rule finding
+        // and a narrower judged one over the same span.
+        let findings = vec![
+            Finding {
+                kind: EntityKind::EmailAddress,
+                start: 8,
+                end: 21,
+                text: "dana@corp.com".into(),
+            },
+            Finding {
+                kind: EntityKind::PersonName,
+                start: 8,
+                end: 12,
+                text: "dana".into(),
+            },
+        ];
+
+        let scrubbed = cloak.scrub_findings(text, findings, |_| Decision::Replace);
+        assert_eq!(
+            scrubbed.replacements.len(),
+            1,
+            "the contained span was not skipped"
+        );
+        assert_eq!(scrubbed.skipped.len(), 1, "the drop was silent");
+        assert_eq!(scrubbed.skipped[0].text, "dana");
+        assert!(
+            !scrubbed.text.contains("dana@corp.com"),
+            "{}",
+            scrubbed.text
+        );
+        assert!(scrubbed.text.starts_with("contact "), "{}", scrubbed.text);
+        assert!(scrubbed.text.ends_with(" now"), "{}", scrubbed.text);
+        assert_eq!(cloak.restore(&scrubbed.text), text);
+    }
+
+    #[test]
+    fn a_judged_finding_scrubs_and_restores_like_any_other() {
+        use crate::detect::candidates::{Survey, candidates};
+        use crate::detect::merge;
+
+        let mut cloak = cloak();
+        let original = "Avery Sinclair approved it; mail dana@corp.com to confirm.";
+
+        // The rules find the address and miss the name, which is the whole
+        // reason a second opinion is worth paying for.
+        let rules = cloak.inspect(original);
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].kind, EntityKind::EmailAddress);
+
+        // A judge says one of the candidates is a person. Anything that can
+        // answer that question works here; this stands in for one.
+        let judged: Vec<Finding> = candidates(original, &rules, &Survey::default())
+            .into_iter()
+            .filter(|candidate| candidate.text == "Avery Sinclair")
+            .map(|candidate| Finding {
+                kind: EntityKind::PersonName,
+                start: candidate.start,
+                end: candidate.end,
+                text: candidate.text,
+            })
+            .collect();
+        assert_eq!(judged.len(), 1, "the name was not put forward");
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.displaced, 0);
+        let scrubbed = cloak.scrub_findings(original, merged.findings, |_| Decision::Replace);
+
+        assert_eq!(scrubbed.replacements.len(), 2);
+        assert!(
+            !scrubbed.text.contains("Avery Sinclair"),
+            "{}",
+            scrubbed.text
+        );
+        assert!(
+            !scrubbed.text.contains("dana@corp.com"),
+            "{}",
+            scrubbed.text
+        );
+        // And the round trip holds, which is the point: a judged finding is
+        // not a redaction, it is a substitution like the rest.
+        assert_eq!(cloak.restore(&scrubbed.text), original);
     }
 
     #[test]

@@ -26,7 +26,6 @@ fixtures = []
 [dependencies]
 aho-corasick.workspace = true
 hmac.workspace = true
-once_cell.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 regex.workspace = true

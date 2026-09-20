@@ -67,7 +67,7 @@ pub mod vault;
 #[cfg(any(test, feature = "fixtures"))]
 pub mod fixtures;
 
-pub use detect::{Detector, DetectorError, Finding};
+pub use detect::{Detector, DetectorError, Finding, Merged};
 pub use engine::{Cloak, Decision, Replacement, Scrubbed};
 pub use entity::{Category, EntityKind};
 pub use fake::{Style, Surrogates};
