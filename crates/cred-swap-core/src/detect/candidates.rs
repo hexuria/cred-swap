@@ -24,10 +24,12 @@
 //!
 //! let found = cloak.inspect(text);          // the rules find nothing here
 //! let asking = candidates(text, &found, &Survey::default());
-//! assert!(asking.iter().any(|c| c.text == "Avery Sinclair"));
+//! assert!(asking.candidates.iter().any(|c| c.text == "Avery Sinclair"));
+//! assert!(!asking.truncated());
 //! # Ok::<(), cred_swap_core::DetectorError>(())
 //! ```
 
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -40,7 +42,7 @@ use super::Finding;
 /// The shape is a hint for whoever judges, not a claim. It says what kind of
 /// question is worth asking about this span, which is usually enough to pick
 /// the right one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Shape {
     /// A run of capitalised words. A person, a company, a place, or the name
@@ -70,6 +72,11 @@ impl Shape {
 }
 
 /// A span put forward for judgement.
+///
+/// Carries raw text, and up to a couple of hundred characters of the text
+/// around it, because that is what a judge needs to answer. It is therefore
+/// exactly as sensitive as the message it came from: send it to a classifier,
+/// do not send it to a log.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     /// The span itself.
@@ -96,12 +103,12 @@ impl Candidate {
         self.start..self.end
     }
 
-    fn overlaps_finding(&self, finding: &Finding) -> bool {
-        self.start < finding.end && finding.start < self.end
+    const fn span(&self) -> (usize, usize) {
+        (self.start, self.end)
     }
 
-    fn overlaps(&self, other: &Self) -> bool {
-        self.start < other.end && other.start < self.end
+    fn overlaps_finding(&self, finding: &Finding) -> bool {
+        super::spans_overlap(self.span(), finding.span())
     }
 }
 
@@ -144,19 +151,97 @@ impl Survey {
         }
     }
 
-    /// Return at most `limit` candidates.
+    /// Spend the budget on at most `limit` distinct values.
     #[must_use]
     pub const fn limit(mut self, limit: usize) -> Self {
         self.limit = limit;
         self
     }
+
+    /// Carry `width` characters of surrounding text with each candidate.
+    #[must_use]
+    pub const fn context(mut self, width: usize) -> Self {
+        self.context = width;
+        self
+    }
 }
 
-/// Two or more capitalised words in a row, or one that is not starting a
-/// sentence. Apostrophes and hyphens are inside names; full stops are not.
+/// What a survey turned up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Surveyed {
+    /// The spans to ask about, in document order.
+    pub candidates: Vec<Candidate>,
+    /// Distinct values the budget could not afford.
+    ///
+    /// A bare `Vec` would make a clean survey and a truncated one look the
+    /// same, which is the failure this whole feature exists to avoid: a caller
+    /// would report "nothing else looked sensitive" when the honest answer is
+    /// "I stopped looking". Non-zero means raise [`Survey::limit`], or accept
+    /// that some of the message went unexamined and say so.
+    pub dropped: usize,
+}
+
+impl Surveyed {
+    /// Whether anything was put forward.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.candidates.is_empty()
+    }
+
+    /// How many spans are being asked about.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.candidates.len()
+    }
+
+    /// Whether the budget ran out before the message did.
+    #[must_use]
+    pub const fn truncated(&self) -> bool {
+        self.dropped > 0
+    }
+
+    /// The candidates, in document order.
+    pub fn iter(&self) -> std::slice::Iter<'_, Candidate> {
+        self.candidates.iter()
+    }
+}
+
+impl IntoIterator for Surveyed {
+    type Item = Candidate;
+    type IntoIter = std::vec::IntoIter<Candidate>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.candidates.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Surveyed {
+    type Item = &'a Candidate;
+    type IntoIter = std::slice::Iter<'a, Candidate>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.candidates.iter()
+    }
+}
+
+/// A run of capitalised words. Unicode classes rather than `A-Z`, so that
+/// `Müller`, `Étienne` and `Ægir` are seen at all: an ASCII class quietly
+/// makes every non-English name invisible, which is the opposite of what a
+/// recall pass is for. Apostrophes and hyphens live inside names; full stops
+/// do not.
 static PROPER_NOUN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b[A-Z][a-z'\u{2019}\-]{1,19}(?:\s+[A-Z][a-z'\u{2019}\-]{1,19}){0,3}\b")
+    Regex::new(r"\b\p{Lu}[\p{Ll}\p{Lm}\p{Lo}'\u{2019}\-]{1,19}(?:\s+\p{Lu}[\p{Ll}\p{Lm}\p{Lo}'\u{2019}\-]{1,19}){0,3}\b")
         .unwrap_or_else(|error| unreachable!("proper-noun pattern is valid: {error}"))
+});
+
+/// A run of script that has no case at all, such as CJK, and so can never be
+/// caught by a capitalisation rule.
+///
+/// Deliberately crude: it raises the run and lets the judge decide, because
+/// the alternative is that these languages are structurally invisible here.
+static UNCASED_RUN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[\p{Han}\p{Hiragana}\p{Katakana}\p{Hangul}\p{Arabic}\p{Hebrew}\p{Thai}\p{Devanagari}]{2,24}")
+        .unwrap_or_else(|error| unreachable!("uncased-run pattern is valid: {error}"))
 });
 
 /// `label: value` in any of the spellings a config file or a log line uses.
@@ -192,8 +277,15 @@ const SENTENCE_STARTERS: &[&str] = &[
 /// Anything already claimed by `found` is left out: the rules were sure, and
 /// paying to ask about it again buys nothing. Candidates never overlap each
 /// other, and come back in document order.
+///
+/// The budget is spent on *distinct values*, taken round-robin across shapes.
+/// Both halves of that matter. Spending per occurrence meant a name repeated
+/// five times cost five slots and five identical questions; spending
+/// longest-first meant the eighty-character labelled values were admitted
+/// before any fourteen-character name, so the thing this exists to catch was
+/// the first thing dropped.
 #[must_use]
-pub fn candidates(text: &str, found: &[Finding], survey: &Survey) -> Vec<Candidate> {
+pub fn candidates(text: &str, found: &[Finding], survey: &Survey) -> Surveyed {
     let mut raised = Vec::new();
 
     for shape in &survey.shapes {
@@ -202,7 +294,16 @@ pub fn candidates(text: &str, found: &[Finding], survey: &Survey) -> Vec<Candida
             Shape::LabelledValue => {
                 raise_captured(text, &LABELLED, 2, Shape::LabelledValue, &mut raised);
             }
-            Shape::OpaqueToken => raise_captured(text, &OPAQUE, 0, Shape::OpaqueToken, &mut raised),
+            Shape::OpaqueToken => {
+                raise_captured(text, &OPAQUE, 0, Shape::OpaqueToken, &mut raised);
+                // A run of nothing but digits and separators is `Numeric`.
+                // Leaving it here too would have both shapes claim the span,
+                // and the order they happen to be raised in would decide.
+                raised.retain(|candidate| {
+                    candidate.shape != Shape::OpaqueToken
+                        || candidate.text.chars().any(char::is_alphabetic)
+                });
+            }
             Shape::Numeric => raise_captured(text, &NUMERIC, 0, Shape::Numeric, &mut raised),
         }
     }
@@ -221,23 +322,67 @@ pub fn candidates(text: &str, found: &[Finding], survey: &Survey) -> Vec<Candida
             .cmp(&(a.end - a.start))
             .then_with(|| a.start.cmp(&b.start))
     });
+    let mut settled = super::pick_disjoint(raised, Candidate::span);
+    settled.sort_by_key(|candidate| candidate.start);
 
-    let mut kept: Vec<Candidate> = Vec::new();
-    for candidate in raised {
-        if kept.len() >= survey.limit {
-            break;
-        }
-        if kept.iter().any(|held| held.overlaps(&candidate)) {
-            continue;
-        }
-        kept.push(candidate);
-    }
+    // Owned, so the borrow the budget takes on `settled` ends before the move.
+    let (affordable, dropped) = {
+        let (afforded, dropped) = afford(&settled, survey);
+        let owned: HashSet<String> = afforded.into_iter().map(ToOwned::to_owned).collect();
+        (owned, dropped)
+    };
+    let mut kept: Vec<Candidate> = settled
+        .into_iter()
+        .filter(|candidate| affordable.contains(&candidate.text))
+        .collect();
 
     for candidate in &mut kept {
         candidate.context = window(text, candidate.start, candidate.end, survey.context);
     }
-    kept.sort_by_key(|candidate| candidate.start);
-    kept
+    Surveyed {
+        candidates: kept,
+        dropped,
+    }
+}
+
+/// Choose which distinct values the budget stretches to.
+///
+/// Round-robin across the shapes present, each taking its next value in
+/// document order, so no one shape can eat the whole allowance. Returns the
+/// values that fit and how many distinct ones did not.
+fn afford<'a>(settled: &'a [Candidate], survey: &Survey) -> (HashSet<&'a str>, usize) {
+    // Distinct values per shape, in document order, first occurrence only.
+    let mut queues: BTreeMap<Shape, VecDeque<&str>> = BTreeMap::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for candidate in settled {
+        if seen.insert(candidate.text.as_str()) {
+            queues
+                .entry(candidate.shape)
+                .or_default()
+                .push_back(candidate.text.as_str());
+        }
+    }
+    let distinct = seen.len();
+
+    let mut afforded: HashSet<&str> = HashSet::with_capacity(survey.limit.min(distinct));
+    while afforded.len() < survey.limit {
+        let mut took_any = false;
+        for queue in queues.values_mut() {
+            if afforded.len() >= survey.limit {
+                break;
+            }
+            if let Some(value) = queue.pop_front() {
+                afforded.insert(value);
+                took_any = true;
+            }
+        }
+        if !took_any {
+            break;
+        }
+    }
+
+    let dropped = distinct - afforded.len();
+    (afforded, dropped)
 }
 
 fn raise_proper_nouns(text: &str, out: &mut Vec<Candidate>) {
@@ -245,21 +390,14 @@ fn raise_proper_nouns(text: &str, out: &mut Vec<Candidate>) {
         let span = matched.as_str();
         let words = span.split_whitespace().count();
 
-        // One capitalised word is usually a sentence opening, a heading or an
-        // ordinary noun. Only put it forward when something else suggests it
-        // is a name: it is not a known opener, and not the first word of the
-        // text or of a line.
-        if words == 1 {
-            if SENTENCE_STARTERS.contains(&span) {
-                continue;
-            }
-            let opens_a_line = text[..matched.start()]
-                .chars()
-                .next_back()
-                .is_none_or(|before| before == '\n');
-            if opens_a_line {
-                continue;
-            }
+        // One capitalised word is often a sentence opening or a heading, so the
+        // highest-frequency openers are skipped. Position is deliberately NOT
+        // used: a name at the start of a line is the commonest shape in a
+        // transcript, and skipping line openers made `Dana: the deploy failed`
+        // impossible to mask, which is the exact case this exists for. The
+        // cost is a few more questions, and a judge that answers them.
+        if words == 1 && SENTENCE_STARTERS.contains(&span) {
+            continue;
         }
 
         out.push(Candidate {
@@ -270,11 +408,27 @@ fn raise_proper_nouns(text: &str, out: &mut Vec<Candidate>) {
             context: String::new(),
         });
     }
+
+    // Scripts with no upper case cannot be found by a capitalisation rule at
+    // all, so they are raised wholesale and left to the judge.
+    for matched in UNCASED_RUN.find_iter(text) {
+        out.push(Candidate {
+            text: matched.as_str().to_owned(),
+            start: matched.start(),
+            end: matched.end(),
+            shape: Shape::ProperNoun,
+            context: String::new(),
+        });
+    }
 }
 
 fn raise_captured(text: &str, regex: &Regex, group: usize, shape: Shape, out: &mut Vec<Candidate>) {
     for captures in regex.captures_iter(text) {
-        let Some(matched) = captures.get(group).or_else(|| captures.get(0)) else {
+        // No fallback to group 0. Every rule here names a group that always
+        // participates, so a miss would be a bug in the pattern, and quietly
+        // widening to the whole match would hide it behind a bigger span.
+        let Some(matched) = captures.get(group) else {
+            debug_assert!(false, "pattern for {shape:?} has no group {group}");
             continue;
         };
         out.push(Candidate {
@@ -312,7 +466,7 @@ fn window(text: &str, start: usize, end: usize, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Cloak, Policy, Style, Surrogates};
+    use crate::{Cloak, EntityKind, Policy, Style, Surrogates};
 
     fn cloak() -> Cloak {
         Cloak::new(
@@ -322,13 +476,57 @@ mod tests {
         .expect("the default policy compiles")
     }
 
-    fn raise(text: &str) -> Vec<Candidate> {
+    fn raise(text: &str) -> Surveyed {
         candidates(text, &cloak().inspect(text), &Survey::default())
     }
 
-    fn texts(found: &[Candidate]) -> Vec<&str> {
-        found.iter().map(|c| c.text.as_str()).collect()
+    fn texts(found: &Surveyed) -> Vec<&str> {
+        found.candidates.iter().map(|c| c.text.as_str()).collect()
     }
+
+    fn shaped(found: &Surveyed, shape: Shape) -> Vec<&str> {
+        found
+            .candidates
+            .iter()
+            .filter(|c| c.shape == shape)
+            .map(|c| c.text.as_str())
+            .collect()
+    }
+
+    /// `count` distinct two-word names. Appending a digit does not work: a
+    /// digit is not a lowercase letter, so `Avery Sinclair7` matches as
+    /// `Avery` and every one of them collapses to the same value.
+    fn distinct_names(count: usize) -> Vec<String> {
+        const GIVEN: &[&str] = &[
+            "Avery", "Rowan", "Quinn", "Harper", "Emerson", "Finley", "Sawyer", "Reese", "Marlow",
+            "Ellis",
+        ];
+        const FAMILY: &[&str] = &[
+            "Ashford",
+            "Barlow",
+            "Cartwright",
+            "Ellington",
+            "Granger",
+            "Halloway",
+            "Ingram",
+            "Kingsley",
+            "Lockhart",
+            "Prescott",
+        ];
+        (0..count)
+            .map(|index| {
+                format!(
+                    "{} {}",
+                    GIVEN[index % GIVEN.len()],
+                    FAMILY[(index / GIVEN.len()) % FAMILY.len()]
+                )
+            })
+            .collect()
+    }
+
+    // ---------------------------------------------------------------
+    // What each shape must catch, and what it must not.
+    // ---------------------------------------------------------------
 
     #[test]
     fn a_name_the_rules_cannot_see_is_put_forward() {
@@ -341,14 +539,182 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_opens_a_line_is_put_forward() {
+        // The commonest shape in a transcript, and the case that an earlier
+        // "skip line openers" rule made impossible to mask.
+        let raised = raise("Dana: the deploy failed\nRowan: rolling back");
+        let names = shaped(&raised, Shape::ProperNoun);
+        assert!(names.contains(&"Dana"), "{names:?}");
+        assert!(names.contains(&"Rowan"), "{names:?}");
+    }
+
+    #[test]
     fn a_sentence_opening_is_not_put_forward_as_a_name() {
         let raised = raise("The parser allocates on every token. This is the bug.");
         assert!(
-            texts(&raised).is_empty(),
+            shaped(&raised, Shape::ProperNoun).is_empty(),
             "ordinary prose raised: {:?}",
             texts(&raised)
         );
     }
+
+    #[test]
+    fn non_english_names_are_visible() {
+        // An ASCII-only class makes these structurally invisible, which is the
+        // opposite of what a recall pass is for.
+        for name in ["Müller", "Étienne Lefèvre", "Ægir Ólafsson"] {
+            let text = format!("approved by {name} today");
+            assert!(
+                texts(&raise(&text))
+                    .iter()
+                    .any(|found| name.starts_with(found)),
+                "{name} was not raised"
+            );
+        }
+    }
+
+    #[test]
+    fn scripts_without_capitalisation_are_raised_wholesale() {
+        let raised = raise("approved by 田中太郎 today");
+        assert!(texts(&raised).contains(&"田中太郎"), "{:?}", texts(&raised));
+    }
+
+    #[test]
+    fn a_labelled_value_is_raised_but_an_ordinary_sentence_is_not() {
+        let raised = raise("owner_reference = 8fj2Kd93ldMzQ01xPq");
+        assert_eq!(
+            shaped(&raised, Shape::LabelledValue),
+            vec!["8fj2Kd93ldMzQ01xPq"]
+        );
+
+        // Prose with no assignment in it must raise no labelled value at all.
+        let prose = raise("we rewrote the loop and it got faster");
+        assert!(
+            shaped(&prose, Shape::LabelledValue).is_empty(),
+            "{:?}",
+            texts(&prose)
+        );
+    }
+
+    #[test]
+    fn an_opaque_token_is_raised_but_an_ordinary_word_is_not() {
+        let raised = raise("the value aG7xQ92mZk1pLw83Tb5R came back");
+        assert!(shaped(&raised, Shape::OpaqueToken).contains(&"aG7xQ92mZk1pLw83Tb5R"));
+
+        // Nothing under sixteen characters, and no ordinary prose.
+        let prose = raise("the configuration was reloaded successfully");
+        assert!(
+            shaped(&prose, Shape::OpaqueToken).is_empty(),
+            "{:?}",
+            texts(&prose)
+        );
+    }
+
+    #[test]
+    fn a_long_digit_run_is_raised_but_a_short_one_is_not() {
+        // Twenty digits: too long for a card, and with no separators the phone
+        // rule cannot claim it either, so it reaches the survey.
+        let raised = raise("reference 12345678901234567890 for the claim");
+        assert_eq!(
+            shaped(&raised, Shape::Numeric),
+            vec!["12345678901234567890"],
+            "{:?}",
+            texts(&raised)
+        );
+
+        let short = raise("we saw 42 retries in 2 hours");
+        assert!(
+            shaped(&short, Shape::Numeric).is_empty(),
+            "{:?}",
+            texts(&short)
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // The budget.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn the_budget_is_spent_on_distinct_values_not_occurrences() {
+        let text = "Avery Sinclair wrote it. Avery Sinclair shipped it. Avery Sinclair broke it.";
+        let raised = candidates(text, &[], &Survey::default().limit(1));
+
+        assert!(
+            !raised.truncated(),
+            "one value should cost one slot, {:?}",
+            raised.dropped
+        );
+        assert_eq!(
+            texts(&raised).len(),
+            3,
+            "every occurrence must come back, or only one of them can be masked"
+        );
+    }
+
+    #[test]
+    fn the_budget_is_shared_between_shapes_rather_than_taken_longest_first() {
+        // Labelled values are far longer than names, so a longest-first budget
+        // admitted all of them and none of the names.
+        use std::collections::BTreeSet;
+
+        use std::fmt::Write as _;
+
+        let mut text = String::new();
+        for index in 0..20 {
+            let _ = writeln!(
+                text,
+                "setting_number_{index} = a-fairly-long-configuration-value-{index}"
+            );
+        }
+        for name in distinct_names(20) {
+            let _ = writeln!(text, "approved by {name} today");
+        }
+
+        let raised = candidates(&text, &[], &Survey::default().limit(10));
+        let names: BTreeSet<&str> = shaped(&raised, Shape::ProperNoun).into_iter().collect();
+        let values: BTreeSet<&str> = shaped(&raised, Shape::LabelledValue).into_iter().collect();
+
+        assert!(
+            names.len() >= 3,
+            "names were crowded out by longer values: {} names, {} values",
+            names.len(),
+            values.len()
+        );
+        assert!(
+            values.len() >= 3,
+            "values were crowded out: {} names, {} values",
+            names.len(),
+            values.len()
+        );
+    }
+
+    #[test]
+    fn truncation_is_reported_rather_than_silent() {
+        use std::fmt::Write as _;
+
+        let mut text = String::new();
+        for name in distinct_names(50) {
+            let _ = write!(text, "approved by {name} today. ");
+        }
+
+        let raised = candidates(&text, &[], &Survey::default().limit(10));
+        assert!(
+            raised.truncated(),
+            "a caller could not tell it was truncated"
+        );
+        assert_eq!(raised.dropped, 40, "{} raised", raised.len());
+    }
+
+    #[test]
+    fn a_survey_that_fits_reports_nothing_dropped() {
+        let raised = raise("Avery Sinclair approved it.");
+        assert!(!raised.truncated());
+        assert_eq!(raised.dropped, 0);
+    }
+
+    // ---------------------------------------------------------------
+    // Shared behaviour.
+    // ---------------------------------------------------------------
 
     #[test]
     fn what_the_rules_already_found_is_not_asked_about_again() {
@@ -358,7 +724,10 @@ mod tests {
 
         let raised = candidates(text, &found, &Survey::default());
         assert!(
-            raised.iter().all(|c| !c.text.contains("dana@corp.com")),
+            raised
+                .candidates
+                .iter()
+                .all(|c| !c.text.contains("dana@corp.com")),
             "{:?}",
             texts(&raised)
         );
@@ -369,6 +738,7 @@ mod tests {
         let text = "The change was approved by Avery Sinclair on the second of June.";
         let raised = raise(text);
         let name = raised
+            .candidates
             .iter()
             .find(|c| c.text == "Avery Sinclair")
             .expect("the name is a candidate");
@@ -377,54 +747,37 @@ mod tests {
     }
 
     #[test]
-    fn a_labelled_value_beats_the_bare_token_inside_it() {
-        let raised = raise("owner_reference = 8fj2Kd93ldMzQ01xPq");
-        let covering = raised
-            .iter()
-            .find(|c| c.text.contains("8fj2Kd93ldMzQ01xPq"))
-            .expect("the value is a candidate");
-        assert_eq!(covering.shape, Shape::LabelledValue);
-        assert_eq!(raised.len(), 1, "{:?}", texts(&raised));
-    }
-
-    #[test]
     fn candidates_never_overlap_and_arrive_in_order() {
         let raised = raise(
             "Avery Sinclair and Rowan Whitfield met at Northwind Logistics about 4029 8811 2233.",
         );
-        for pair in raised.windows(2) {
+        for pair in raised.candidates.windows(2) {
             assert!(
                 pair[0].end <= pair[1].start,
                 "overlap: {:?} then {:?}",
-                pair[0],
-                pair[1]
+                pair[0].text,
+                pair[1].text
             );
         }
-    }
-
-    #[test]
-    fn the_limit_is_a_hard_bound() {
-        use std::fmt::Write as _;
-        let mut text = String::new();
-        for index in 0..200 {
-            let _ = write!(text, "Avery Sinclair{index} wrote it. ");
-        }
-        let raised = candidates(&text, &[], &Survey::default().limit(10));
-        assert_eq!(raised.len(), 10);
     }
 
     #[test]
     fn a_survey_can_ask_for_one_shape_only() {
         let text = "Avery Sinclair set token = aG7xQ92mZk1pLw83Tb";
         let raised = candidates(text, &[], &Survey::only(Shape::ProperNoun));
-        assert!(raised.iter().all(|c| c.shape == Shape::ProperNoun));
+        assert!(
+            raised
+                .candidates
+                .iter()
+                .all(|c| c.shape == Shape::ProperNoun)
+        );
         assert!(texts(&raised).contains(&"Avery Sinclair"));
     }
 
     #[test]
     fn offsets_index_the_original_text() {
         let text = "approved by Avery Sinclair today";
-        for candidate in raise(text) {
+        for candidate in &raise(text) {
             assert_eq!(&text[candidate.range()], candidate.text);
         }
     }
@@ -432,7 +785,7 @@ mod tests {
     #[test]
     fn multibyte_text_is_not_split() {
         let text = "Café — Avery Sinclair signed 🙂 on Tuesday";
-        for candidate in raise(text) {
+        for candidate in &raise(text) {
             assert_eq!(&text[candidate.range()], candidate.text);
             assert!(text.contains(candidate.context.trim_matches('…')));
         }
@@ -440,6 +793,48 @@ mod tests {
 
     #[test]
     fn empty_text_raises_nothing() {
-        assert!(raise("").is_empty());
+        let raised = raise("");
+        assert!(raised.is_empty());
+        assert_eq!(raised.dropped, 0);
+    }
+
+    #[test]
+    fn a_judged_candidate_can_be_scrubbed_and_restored() {
+        let mut cloak = cloak();
+        let text = "Avery Sinclair approved it.";
+        let raised = candidates(text, &[], &Survey::default());
+
+        let judged: Vec<Finding> = raised
+            .candidates
+            .iter()
+            .filter(|c| c.text == "Avery Sinclair")
+            .map(|c| Finding {
+                kind: EntityKind::PersonName,
+                start: c.start,
+                end: c.end,
+                text: c.text.clone(),
+            })
+            .collect();
+        assert_eq!(judged.len(), 1);
+
+        let scrubbed = cloak.scrub_findings(text, super::super::merge(Vec::new(), judged), |_| {
+            crate::Decision::Replace
+        });
+        assert!(!scrubbed.text.contains("Avery Sinclair"));
+        assert_eq!(cloak.restore(&scrubbed.text), text);
+    }
+
+    #[test]
+    fn the_shape_name_matches_what_serde_writes() {
+        // Two tables would drift; this is the one that notices.
+        for shape in [
+            Shape::ProperNoun,
+            Shape::LabelledValue,
+            Shape::OpaqueToken,
+            Shape::Numeric,
+        ] {
+            let encoded = serde_json::to_string(&shape).expect("a unit variant serializes");
+            assert_eq!(encoded.trim_matches('"'), shape.as_str());
+        }
     }
 }

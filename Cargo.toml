@@ -47,15 +47,21 @@ hyper = "1.6"
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 rand = { version = "0.9", default-features = false }
 rand_chacha = "0.9"
-# Unicode tables dominate the WebAssembly binary. The rule table is entirely
-# ASCII, so only the classes that change how `\b`, `\w` and `(?i)` behave on
-# real text are kept; the script, age, segmentation and general-category tables
-# are not. The full test suite is the check that this is safe.
+# Unicode tables dominate the WebAssembly binary, so these are chosen rather
+# than defaulted to. `unicode-case` and `unicode-perl` change how `\b`, `\w`
+# and `(?i)` behave on real text. `unicode-gencat` and `unicode-script` are
+# what let the candidate survey see a name that is not spelled in ASCII:
+# without them `Müller`, `Étienne` and every CJK name are structurally
+# invisible to it, which is the opposite of what a recall pass is for. They
+# cost 77 KiB of the browser bundle, measured, and that is worth paying.
+# The age and segmentation tables are still excluded; nothing here uses them.
 regex = { version = "1.11", default-features = false, features = [
     "std",
     "perf",
     "unicode-case",
     "unicode-perl",
+    "unicode-gencat",
+    "unicode-script",
 ] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }

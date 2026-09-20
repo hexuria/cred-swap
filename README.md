@@ -240,27 +240,47 @@ and something with judgement does the deciding.
 use cred_swap_core::detect::candidates::{Survey, candidates};
 use cred_swap_core::detect::merge;
 
-let rules = cloak.inspect(text);                          // precise, narrow
+let rules = cloak.inspect(text);                           // precise, narrow
 let asking = candidates(text, &rules, &Survey::default()); // broad, cheap, local
 
-let judged = your_classifier.verdicts(text, asking);      // the expensive half
+if asking.truncated() {
+    // The budget ran out before the message did. Say so rather than
+    // reporting that nothing else looked sensitive.
+}
+
+let judged = your_classifier.verdicts(text, &asking);      // the expensive half
 
 let scrubbed = cloak.scrub_findings(text, merge(rules, judged), |_| Decision::Replace);
 ```
 
 A judged finding is a substitution, not a redaction: it goes in the same vault,
-gets the same kind of stand-in, and restores the same way.
+gets the same kind of stand-in, and restores the same way. Where a judgement
+collides with a rule, the rule wins, because it matched something and the
+judgement guessed about it.
 
 `candidates` puts forward runs of capitalised words, values sitting after a
 label, long opaque tokens and long digit runs, minus anything the rules already
 claimed. Each one carries the words around it, because a judge shown `Avery`
 alone cannot answer and one shown `approved by Avery Sinclair on Tuesday` can.
-`Survey::limit` bounds the count, so one pasted log file cannot become a
-thousand questions.
+
+`Survey::limit` bounds the cost, and two details of how it is spent matter.
+It buys *distinct values*, so a name repeated five times costs one slot rather
+than five. And it is shared round-robin between shapes, so the long labelled
+values cannot crowd out the short names, which is the thing the pass exists to
+catch. When it runs out, `Surveyed::dropped` says by how much; a caller that
+ignores it will report a clean bill of health when the honest answer is that it
+stopped looking.
+
+Group by `Candidate::text` before asking, so five occurrences of one name are
+one question, and apply the verdict to all of them.
 
 Nothing in this crate knows what your classifier is. There is no network call,
 no async and no model here; the expensive half belongs to the caller, which is
 also the only place that knows what a false positive costs it.
+
+What it still cannot see: a name in text that is entirely lowercase. The survey
+finds candidates by shape, and an all-lowercase sentence offers none, so there
+is nothing to ask about. Names in any script are visible, capitalised or not.
 
 ### As a library
 

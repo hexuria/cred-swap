@@ -33,9 +33,41 @@ impl Finding {
         self.start..self.end
     }
 
-    fn overlaps(&self, other: &Self) -> bool {
-        self.start < other.end && other.start < self.end
+    pub(crate) const fn span(&self) -> (usize, usize) {
+        (self.start, self.end)
     }
+
+    pub(crate) const fn overlaps(&self, other: &Self) -> bool {
+        spans_overlap(self.span(), other.span())
+    }
+}
+
+/// Whether two half-open byte ranges share a byte.
+///
+/// One definition, because three modules need it and three copies of an
+/// off-by-one are three chances to get it wrong in different directions.
+pub(crate) const fn spans_overlap(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 < right.1 && right.0 < left.1
+}
+
+/// Take items in the order given, skipping any that overlap one already taken.
+///
+/// The caller sorts first: that sort is the policy, and it differs. Findings
+/// rank by how specific the rule was; candidates rank by length alone, because
+/// there is no rule behind them to be specific about. The greedy walk
+/// afterwards is the same either way.
+pub(crate) fn pick_disjoint<T>(ordered: Vec<T>, span: impl Fn(&T) -> (usize, usize)) -> Vec<T> {
+    let mut taken: Vec<T> = Vec::with_capacity(ordered.len());
+    for item in ordered {
+        if taken
+            .iter()
+            .any(|kept| spans_overlap(span(kept), span(&item)))
+        {
+            continue;
+        }
+        taken.push(item);
+    }
+    taken
 }
 
 /// A config file asked for something that could not be compiled.
@@ -245,9 +277,22 @@ fn has_word_boundaries(text: &str, start: usize, end: usize) -> bool {
 /// The result is safe to hand to [`crate::Cloak::scrub_findings`].
 #[must_use]
 pub fn merge(rules: Vec<Finding>, judged: Vec<Finding>) -> Vec<Finding> {
-    let mut all = rules;
-    all.extend(judged);
-    resolve_overlaps(all)
+    // Provenance decides, not the kind table. Precedence ranks how *specific*
+    // a pattern is, which says nothing about whether a guess should override a
+    // match: a judged `Custom` kind outranks `CreditCard` on that table, so
+    // ranking across the two lists would let "this looked like a company name"
+    // win over a number that passed the Luhn check.
+    let settled = resolve_overlaps(rules);
+    let unclaimed: Vec<Finding> = judged
+        .into_iter()
+        .filter(|candidate| !settled.iter().any(|kept| kept.overlaps(candidate)))
+        .collect();
+
+    // Within each list precedence still does the work it is good at.
+    let mut all = settled;
+    all.extend(resolve_overlaps(unclaimed));
+    all.sort_by_key(|finding| finding.start);
+    all
 }
 
 /// Pick a non-overlapping subset of candidates and sort it by position.
@@ -265,13 +310,7 @@ fn resolve_overlaps(mut candidates: Vec<Finding>) -> Vec<Finding> {
             .then_with(|| a.kind.cmp(&b.kind))
     });
 
-    let mut accepted: Vec<Finding> = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        if accepted.iter().any(|kept| kept.overlaps(&candidate)) {
-            continue;
-        }
-        accepted.push(candidate);
-    }
+    let mut accepted = pick_disjoint(candidates, Finding::span);
     accepted.sort_by_key(|finding| finding.start);
     accepted
 }
@@ -402,6 +441,51 @@ mod tests {
         let merged = merge(rules, judged);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].kind, EntityKind::EmailAddress);
+    }
+
+    #[test]
+    fn a_rule_wins_even_when_the_judged_kind_outranks_it() {
+        // `Custom` sits at 80 on the precedence table and `CreditCard` at 70,
+        // so ranking the two lists together would let a guess beat a number
+        // that passed its check digit. It is the provenance that decides.
+        let rules = vec![Finding {
+            kind: EntityKind::CreditCard,
+            start: 6,
+            end: 25,
+            text: "4242 4242 4242 4242".into(),
+        }];
+        let judged = vec![Finding {
+            kind: EntityKind::Custom("organisation".into()),
+            start: 6,
+            end: 25,
+            text: "4242 4242 4242 4242".into(),
+        }];
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].kind, EntityKind::CreditCard);
+    }
+
+    #[test]
+    fn judged_findings_still_resolve_against_each_other() {
+        let judged = vec![
+            Finding {
+                kind: EntityKind::PersonName,
+                start: 0,
+                end: 14,
+                text: "Avery Sinclair".into(),
+            },
+            Finding {
+                kind: EntityKind::Custom("organisation".into()),
+                start: 6,
+                end: 14,
+                text: "Sinclair".into(),
+            },
+        ];
+
+        let merged = merge(Vec::new(), judged);
+        assert_eq!(merged.len(), 1, "two judged spans overlapped in the output");
+        assert_eq!(merged[0].kind, EntityKind::Custom("organisation".into()));
     }
 
     #[test]

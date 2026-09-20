@@ -41,6 +41,13 @@ pub struct Scrubbed {
     pub replacements: Vec<Replacement>,
     /// Findings the caller chose to leave in place.
     pub kept: Vec<Finding>,
+    /// Findings dropped because they overlapped one already applied.
+    ///
+    /// Always empty for [`Cloak::scrub`] and [`Cloak::scrub_with`], whose
+    /// findings come from the detector and cannot overlap. Non-empty only when
+    /// a caller hands [`Cloak::scrub_findings`] a list that does, and then it
+    /// is the answer to "why is that still in the text".
+    pub skipped: Vec<Finding>,
 }
 
 impl Scrubbed {
@@ -135,6 +142,10 @@ impl Cloak {
     /// could be restored and the model lost track of who it was talking about.
     pub fn scrub_with(&mut self, text: &str, decide: impl FnMut(&Finding) -> Decision) -> Scrubbed {
         let findings = self.detector.scan(text);
+        debug_assert!(
+            findings.windows(2).all(|pair| pair[0].end <= pair[1].start),
+            "the detector returned overlapping or unordered spans"
+        );
         self.apply(text, findings, decide)
     }
 
@@ -149,15 +160,21 @@ impl Cloak {
         let mut out = String::with_capacity(text.len());
         let mut replacements = Vec::new();
         let mut kept = Vec::new();
+        let mut skipped = Vec::new();
         let mut cursor = 0usize;
 
         for finding in findings {
-            // Findings from `scan` never overlap, so a monotonic cursor is
-            // enough and no offset arithmetic is needed.
-            debug_assert!(
-                finding.start >= cursor,
-                "detector returned overlapping spans"
-            );
+            // A monotonic cursor is all this needs, so a span that starts
+            // behind the cursor is dropped rather than sliced backwards. There
+            // is no assertion here on purpose: `scrub_findings` takes a list
+            // the caller assembled, where an overlap is bad input rather than
+            // a broken invariant, and panicking half way through a rewrite
+            // leaves them unable to tell how much was already replaced. The
+            // invariant is asserted in `scrub_with`, where it really is one.
+            if finding.start < cursor {
+                skipped.push(finding);
+                continue;
+            }
             out.push_str(&text[cursor..finding.start]);
             cursor = finding.end;
 
@@ -190,6 +207,7 @@ impl Cloak {
             text: out,
             replacements,
             kept,
+            skipped,
         }
     }
 
@@ -202,9 +220,10 @@ impl Cloak {
     /// ones the rules use, so a judged finding restores exactly like any other.
     ///
     /// `findings` must not overlap and must be in document order, which is
-    /// what [`merge`] guarantees. In a debug build an overlap trips an
-    /// assertion; in a release build the later span is skipped rather than
-    /// producing spliced text.
+    /// what [`merge`] guarantees. An overlap trips an assertion in a debug
+    /// what [`merge`] guarantees. A span that overlaps one already applied is
+    /// dropped and reported in [`Scrubbed::skipped`], rather than panicking
+    /// half way through a rewrite the caller cannot then inspect.
     ///
     /// [`candidates`]: crate::detect::candidates::candidates
     /// [`merge`]: crate::detect::merge
@@ -396,6 +415,46 @@ mod tests {
         let restored = cloak.restore(&transcript);
         assert_eq!(restored.matches("dana@corp.com").count(), 5);
         assert_eq!(cloak.vault().len(), 1);
+    }
+
+    #[test]
+    fn overlapping_findings_are_skipped_rather_than_panicking() {
+        let mut cloak = cloak();
+        let text = "contact dana@corp.com now";
+
+        // What a caller assembling their own list can produce: a rule finding
+        // and a narrower judged one over the same span.
+        let findings = vec![
+            Finding {
+                kind: EntityKind::EmailAddress,
+                start: 8,
+                end: 21,
+                text: "dana@corp.com".into(),
+            },
+            Finding {
+                kind: EntityKind::PersonName,
+                start: 8,
+                end: 12,
+                text: "dana".into(),
+            },
+        ];
+
+        let scrubbed = cloak.scrub_findings(text, findings, |_| Decision::Replace);
+        assert_eq!(
+            scrubbed.replacements.len(),
+            1,
+            "the contained span was not skipped"
+        );
+        assert_eq!(scrubbed.skipped.len(), 1, "the drop was silent");
+        assert_eq!(scrubbed.skipped[0].text, "dana");
+        assert!(
+            !scrubbed.text.contains("dana@corp.com"),
+            "{}",
+            scrubbed.text
+        );
+        assert!(scrubbed.text.starts_with("contact "), "{}", scrubbed.text);
+        assert!(scrubbed.text.ends_with(" now"), "{}", scrubbed.text);
+        assert_eq!(cloak.restore(&scrubbed.text), text);
     }
 
     #[test]
