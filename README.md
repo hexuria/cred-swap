@@ -225,6 +225,43 @@ If you would rather not touch the harness at all, `cred-swap proxy` gives you
 the same thing at the HTTP boundary for a one-line base URL change, at the cost
 of not being able to reach tool calls before they execute.
 
+### Asking something with judgement
+
+The rules are precise and narrow. They are blind to a colleague's name in the
+middle of a sentence, because no pattern separates `Avery Sinclair` from
+`Bond Street` from `Redis Cluster` without knowing what the sentence is about.
+
+A classifier can tell those apart and cannot find them: it answers questions,
+it does not return offsets. So the halves fit together the other way round from
+how it first looks. cred-swap does the finding, deliberately over-generously,
+and something with judgement does the deciding.
+
+```rust
+use cred_swap_core::detect::candidates::{Survey, candidates};
+use cred_swap_core::detect::merge;
+
+let rules = cloak.inspect(text);                          // precise, narrow
+let asking = candidates(text, &rules, &Survey::default()); // broad, cheap, local
+
+let judged = your_classifier.verdicts(text, asking);      // the expensive half
+
+let scrubbed = cloak.scrub_findings(text, merge(rules, judged), |_| Decision::Replace);
+```
+
+A judged finding is a substitution, not a redaction: it goes in the same vault,
+gets the same kind of stand-in, and restores the same way.
+
+`candidates` puts forward runs of capitalised words, values sitting after a
+label, long opaque tokens and long digit runs, minus anything the rules already
+claimed. Each one carries the words around it, because a judge shown `Avery`
+alone cannot answer and one shown `approved by Avery Sinclair on Tuesday` can.
+`Survey::limit` bounds the count, so one pasted log file cannot become a
+thousand questions.
+
+Nothing in this crate knows what your classifier is. There is no network call,
+no async and no model here; the expensive half belongs to the caller, which is
+also the only place that knows what a false positive costs it.
+
 ### As a library
 
 ```rust

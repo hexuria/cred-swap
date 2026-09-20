@@ -1,5 +1,6 @@
 //! Finding sensitive spans in text.
 
+pub mod candidates;
 pub mod patterns;
 pub mod validate;
 
@@ -235,6 +236,20 @@ fn has_word_boundaries(text: &str, start: usize, end: usize) -> bool {
     !before.is_some_and(is_word) && !after.is_some_and(is_word)
 }
 
+/// Combine findings from more than one source into one ordered, non-overlapping list.
+///
+/// Use it to fold a classifier's verdicts in beside the rules'. Precedence
+/// decides who wins where two claim the same span, so a rule that knows
+/// exactly what it found beats a judgement that something looked personal.
+///
+/// The result is safe to hand to [`crate::Cloak::scrub_findings`].
+#[must_use]
+pub fn merge(rules: Vec<Finding>, judged: Vec<Finding>) -> Vec<Finding> {
+    let mut all = rules;
+    all.extend(judged);
+    resolve_overlaps(all)
+}
+
 /// Pick a non-overlapping subset of candidates and sort it by position.
 ///
 /// Two rules routinely claim the same span: a vendor key is also a generic
@@ -366,6 +381,47 @@ mod tests {
         let detector = Detector::new(policy).unwrap();
         let found = detector.scan("see ACME-1234 for context");
         assert_eq!(found[0].kind, EntityKind::Custom("ticket".into()));
+    }
+
+    #[test]
+    fn merging_lets_a_rule_win_over_a_judgement() {
+        let rules = vec![Finding {
+            kind: EntityKind::EmailAddress,
+            start: 5,
+            end: 18,
+            text: "dana@corp.com".into(),
+        }];
+        // A judge that thought the same span was a person's name.
+        let judged = vec![Finding {
+            kind: EntityKind::PersonName,
+            start: 5,
+            end: 18,
+            text: "dana@corp.com".into(),
+        }];
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].kind, EntityKind::EmailAddress);
+    }
+
+    #[test]
+    fn merging_keeps_both_when_they_do_not_collide() {
+        let rules = vec![Finding {
+            kind: EntityKind::EmailAddress,
+            start: 0,
+            end: 13,
+            text: "dana@corp.com".into(),
+        }];
+        let judged = vec![Finding {
+            kind: EntityKind::PersonName,
+            start: 20,
+            end: 34,
+            text: "Avery Sinclair".into(),
+        }];
+
+        let merged = merge(rules, judged);
+        assert_eq!(merged.len(), 2);
+        assert!(merged[0].start < merged[1].start, "not in document order");
     }
 
     #[test]
