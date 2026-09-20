@@ -39,6 +39,10 @@
 //! - [`vault`] remembers the pairing, on disk if asked.
 //! - [`engine`] is the three of them wired together, and is what most callers
 //!   want.
+//! - [`json`] runs the same thing over a JSON document, for a provider request
+//!   body or a tool call's arguments.
+//! - [`session`] keeps one [`Cloak`] per conversation, safely shared across
+//!   threads, which is what a server needs.
 //!
 //! # What this is not
 //!
@@ -55,7 +59,9 @@ pub mod detect;
 pub mod engine;
 pub mod entity;
 pub mod fake;
+pub mod json;
 pub mod policy;
+pub mod session;
 pub mod vault;
 
 #[cfg(any(test, feature = "fixtures"))]
@@ -65,5 +71,7 @@ pub use detect::{Detector, DetectorError, Finding};
 pub use engine::{Cloak, Decision, Replacement, Scrubbed};
 pub use entity::{Category, EntityKind};
 pub use fake::{Style, Surrogates};
+pub use json::Changes;
 pub use policy::{CustomPattern, Policy, Term, UnknownPreset};
+pub use session::{Session, SessionError, SessionStore};
 pub use vault::{Entry, Vault, VaultError};

@@ -1,19 +1,25 @@
-//! Rewriting the strings inside a JSON request or response body.
+//! Rewriting the strings inside a JSON document.
 //!
 //! A model API request is a JSON document whose interesting content is spread
-//! across nested message arrays, system prompts and tool results. Rather than
-//! learn each provider's schema, this walks every string in the document and
-//! lets the detector decide. Detection is conservative enough that structural
-//! values — model names, role strings, identifiers — go through untouched.
+//! across nested message arrays, system prompts and tool results, and every
+//! provider arranges them differently. Rather than learn each schema, this
+//! walks every string in the document and lets the detector decide. Detection
+//! is conservative enough that structural values — model names, role strings,
+//! tool names, identifiers — go through untouched.
+//!
+//! The same walk runs in reverse on the way back, which is what makes a tool
+//! call usable: a model handed a stand-in hostname will emit a tool call
+//! containing that stand-in, and [`restore_value`] puts the real host back
+//! before the tool runs.
 
-use cred_swap_core::{Cloak, Scrubbed};
+use crate::engine::{Cloak, Replacement, Scrubbed};
 use serde_json::Value;
 
 /// What a walk over one body changed.
 #[derive(Debug, Default)]
 pub struct Changes {
     /// Substitutions made, across every string in the document.
-    pub replacements: Vec<cred_swap_core::Replacement>,
+    pub replacements: Vec<Replacement>,
 }
 
 impl Changes {
@@ -125,8 +131,8 @@ pub fn restore_body(cloak: &mut Cloak, body: &[u8], is_json: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cred_swap_core::fixtures;
-    use cred_swap_core::{Policy, Style, Surrogates};
+    use crate::fixtures;
+    use crate::{Policy, Style, Surrogates};
 
     fn cloak() -> Cloak {
         Cloak::new(

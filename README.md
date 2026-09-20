@@ -163,6 +163,68 @@ seed from `crypto.getRandomValues` and drops the `getrandom` dependency
 entirely. Store the exported vault in the extension's `storage.local`, which
 other sites cannot read, never in a page's own `localStorage`, which they can.
 
+### In an agent harness or a server
+
+`cred-swap-core` is a plain Rust library with no I/O beyond its own state file,
+so a server can embed it directly rather than proxying through one.
+
+```toml
+[dependencies]
+cred-swap-core = { git = "https://github.com/hexuria/cred-swap" }
+```
+
+A server handling many conversations at once wants `SessionStore`, which keeps
+one vault per conversation, shares it safely across threads, and persists it:
+
+```rust
+use cred_swap_core::session::SessionStore;
+use cred_swap_core::{Policy, Style};
+
+let store = SessionStore::builder()
+    .directory("/var/lib/my-server/cred-swap")
+    .policy(Policy::default())
+    .style(Style::Realistic)
+    .secret(b"a stable per-deployment secret")
+    .build()?;
+
+let session = store.session("run:8f21c4")?;   // cheap, cloneable, Send + Sync
+```
+
+Each session's generator is derived from the store secret and the session id,
+so two conversations give the same real value two different stand-ins. Without
+that, a stand-in seen in one tenant's transcript would identify that value in
+every other tenant's.
+
+**An agent harness needs four hooks, not two.** A chat client scrubs what goes
+out and restores what comes back. An agent also acts on what the model says, so
+the model's own words have to be translated back before they are executed:
+
+| Hook | Call | Why |
+|---|---|---|
+| Outbound request | `session.scrub_json(&mut body)` | Walks every string in the body, whatever the provider's schema. |
+| Tool call arguments | `session.restore_json(&mut call)` | **Before the tool runs.** The model was shown a stand-in host, so it asks you to connect to the stand-in. |
+| Tool result | `session.scrub(&output)` | A file read or command output is where secrets actually enter a transcript. |
+| Final answer | `session.restore(&reply)` | So the human reads real values. |
+
+The second one is the hook people forget, and it is the one that breaks the
+agent rather than leaking: without it the coworker dutifully tries, and fails,
+against a host that does not exist.
+
+For a streamed reply use `session.restore_streaming(&buffer)`, which returns
+the text that is safe to emit and how much of the buffer it consumed. Keep the
+remainder and prepend it to the next chunk, so a stand-in split across two
+chunks still comes back whole.
+
+A runnable version of all four hooks:
+
+```console
+cargo run -p cred-swap-core --example agent_harness
+```
+
+If you would rather not touch the harness at all, `cred-swap proxy` gives you
+the same thing at the HTTP boundary for a one-line base URL change, at the cost
+of not being able to reach tool calls before they execute.
+
 ### As a library
 
 ```rust

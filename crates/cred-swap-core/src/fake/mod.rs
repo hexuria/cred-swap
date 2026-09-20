@@ -100,6 +100,35 @@ impl Surrogates {
         &self.seed
     }
 
+    /// Derive an independent generator for one conversation or tenant.
+    ///
+    /// The derived seed is a one-way function of this one and `label`, so the
+    /// same label always yields the same generator, and no derived generator
+    /// reveals anything about its parent or its siblings.
+    ///
+    /// This is what keeps two conversations from leaking to each other. A
+    /// server that scrubs many conversations against a single generator gives
+    /// the same stand-in to the same value everywhere, which means a stand-in
+    /// seen in one tenant's transcript identifies that value in another's.
+    /// Deriving per conversation removes that link while keeping each
+    /// conversation internally consistent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the HMAC rejects the key. The key is always 32 bytes, so it
+    /// does not.
+    #[must_use]
+    pub fn derive(&self, label: &str) -> Self {
+        let mut mac = HmacSha256::new_from_slice(&self.seed).expect("HMAC accepts a 32-byte key");
+        mac.update(b"cred-swap/derive/v1");
+        mac.update(&[0]);
+        mac.update(label.as_bytes());
+        Self {
+            seed: mac.finalize().into_bytes().into(),
+            style: self.style,
+        }
+    }
+
     /// The configured style.
     #[must_use]
     pub const fn style(&self) -> Style {
@@ -604,6 +633,32 @@ mod tests {
             first.generate(&EntityKind::EmailAddress, "a@b.com", 1, 0),
             second.generate(&EntityKind::EmailAddress, "a@b.com", 1, 0)
         );
+    }
+
+    #[test]
+    fn derived_generators_are_stable_and_independent() {
+        let root = Surrogates::from_secret(b"root", Style::Realistic);
+        let left = root.derive("conversation-a");
+        let right = root.derive("conversation-b");
+
+        // Same label, same generator, every time.
+        assert_eq!(left.seed(), root.derive("conversation-a").seed());
+        // Different labels cannot see each other.
+        assert_ne!(left.seed(), right.seed());
+        // And none of them is the parent.
+        assert_ne!(left.seed(), root.seed());
+
+        assert_ne!(
+            left.generate(&EntityKind::EmailAddress, "dana@corp.com", 1, 0),
+            right.generate(&EntityKind::EmailAddress, "dana@corp.com", 1, 0),
+            "two conversations gave the same value the same stand-in"
+        );
+    }
+
+    #[test]
+    fn derivation_keeps_the_style() {
+        let root = Surrogates::from_secret(b"root", Style::Tagged);
+        assert_eq!(root.derive("x").style(), Style::Tagged);
     }
 
     #[test]

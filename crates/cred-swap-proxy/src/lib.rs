@@ -34,7 +34,6 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, clippy::pedantic)]
 
-pub mod json;
 pub mod sse;
 
 use std::net::SocketAddr;
@@ -48,7 +47,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use cred_swap_core::Cloak;
+use cred_swap_core::{Cloak, json};
 use futures_util::StreamExt as _;
 
 /// Largest request or response body the proxy will buffer, in bytes.
