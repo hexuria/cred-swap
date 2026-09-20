@@ -20,9 +20,11 @@ pub fn canadian_sin(candidate: &str) -> bool {
     luhn_of_length(candidate, 9..=9)
 }
 
-/// Luhn, for a number whose length is known to belong to some other scheme.
-#[must_use]
-pub fn luhn_of_length(candidate: &str, lengths: std::ops::RangeInclusive<usize>) -> bool {
+/// Luhn over a number whose length belongs to some scheme other than a card.
+///
+/// Private because the length range is the whole decision: exposing it would
+/// invite a caller to pass a range admitting a number the scheme never uses.
+fn luhn_of_length(candidate: &str, lengths: std::ops::RangeInclusive<usize>) -> bool {
     let digits: Vec<u32> = candidate.chars().filter_map(|c| c.to_digit(10)).collect();
     if !lengths.contains(&digits.len()) {
         return false;
@@ -191,6 +193,18 @@ pub fn cpf(candidate: &str) -> bool {
         return false;
     }
 
+    let (first, second) = cpf_check_digits(&digits);
+    digits[9] == first && digits[10] == second
+}
+
+/// The two mod-11 check digits a Brazilian CPF body requires.
+///
+/// Shared by the validator and the generator. Two copies of this loop is two
+/// chances for a generated stand-in to fail the very check its own validator
+/// applies, and nothing else would catch that.
+#[must_use]
+pub fn cpf_check_digits(body: &[u32]) -> (u32, u32) {
+    let mut digits: Vec<u32> = body.iter().copied().take(9).collect();
     for length in [9usize, 10] {
         let sum: u32 = digits[..length]
             .iter()
@@ -198,12 +212,9 @@ pub fn cpf(candidate: &str) -> bool {
             .map(|(index, digit)| digit * u32::try_from(length + 1 - index).unwrap_or(0))
             .sum();
         let remainder = sum % 11;
-        let expected = if remainder < 2 { 0 } else { 11 - remainder };
-        if digits[length] != expected {
-            return false;
-        }
+        digits.push(if remainder < 2 { 0 } else { 11 - remainder });
     }
-    true
+    (digits[9], digits[10])
 }
 
 /// The positional weights an ABN checksum uses.
@@ -237,7 +248,12 @@ pub fn nric(candidate: &str) -> bool {
         return false;
     }
     let prefix = bytes[0];
-    if !matches!(prefix, b'S' | b'T' | b'F' | b'G' | b'M') {
+    // S, T, F and G only. The M series uses a different check table and a
+    // different century offset, and neither could be corroborated well enough
+    // to ship: a wrong table silently accepts and rejects the wrong numbers,
+    // and the structural test that would normally catch a mistake here holds
+    // for any table at all, so it could never have caught one.
+    if !matches!(prefix, b'S' | b'T' | b'F' | b'G') {
         return false;
     }
     if !bytes[1..8].iter().all(u8::is_ascii_digit) {
@@ -249,15 +265,14 @@ pub fn nric(candidate: &str) -> bool {
         .zip(NRIC_WEIGHTS)
         .map(|(byte, weight)| u32::from(byte - b'0') * weight)
         .sum();
-    // The century offset: T and G are the 2000s, M is its own series.
+    // The century offset: T and G are the 2000s.
     if matches!(prefix, b'T' | b'G') {
         sum += 4;
     }
 
     let table: &[u8] = match prefix {
         b'S' | b'T' => b"JZIHGFEDCBA",
-        b'F' | b'G' => b"XWUTRQPNMLK",
-        _ => b"XWUTRQPNJLK",
+        _ => b"XWUTRQPNMLK",
     };
     let index = usize::try_from(sum % 11).unwrap_or(0);
     table.get(index).copied() == Some(bytes[8])
@@ -379,9 +394,13 @@ mod tests {
         assert!(nric("S1234567D"));
         assert!(!nric("S1234567A"));
         assert!(!nric("X1234567D"), "X is not an NRIC prefix");
+        assert!(
+            !nric("M1234567X"),
+            "the M series is deliberately not covered"
+        );
         assert!(!nric("S123456D"), "too short");
 
-        for prefix in ["S", "T", "F", "G", "M"] {
+        for prefix in ["S", "T", "F", "G"] {
             let valid = (b'A'..=b'Z')
                 .filter(|letter| nric(&format!("{prefix}1234567{}", char::from(*letter))))
                 .count();

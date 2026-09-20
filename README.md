@@ -266,8 +266,19 @@ Everything generated is inert by construction:
 | IPv6 | `2001:db8::/32`, the RFC 3849 documentation prefix |
 | Phone | `555-0100`–`555-0199`, the block reserved for fiction |
 | US SSN | The `900` block, which is never issued |
+| US ITIN | Area `9xx` with group `93`, which is neither an SSN nor an issued ITIN |
+| UK NINO | The `ZZ` prefix, which heads HMRC's own never-issued list |
+| Canadian SIN | A leading `8`, which is never assigned |
+| Indian Aadhaar | A leading `1`, which is never issued |
 | MAC | A locally-administered address, which no manufacturer holds |
 | Stripe key | Always test mode, so a leak fails loudly instead of moving money |
+
+Not every scheme has a block set aside, and the ones that do not are said so
+rather than implied otherwise. A Philippine TIN, an Australian ABN, a Brazilian
+CPF, a Singapore NRIC, an Indian PAN and an EU VAT number all come back
+well-formed, and each could in principle coincide with a number somebody holds.
+Where the scheme has a checksum the stand-in satisfies it, so masked text still
+validates the way the original did.
 
 **The vault** records each pairing so the substitution is consistent and
 reversible. It lives in one file per session, written owner-only, and it is the

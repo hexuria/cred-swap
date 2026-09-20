@@ -324,7 +324,12 @@ impl EntityKind {
         match self {
             Self::SshPrivateKey => 105,
             Self::PrivateKeyBlock => 100,
-            Self::AnthropicKey => 95,
+            // Above the vendor rules below, because both claim the same span
+            // for a token whose prefix begins `sk-`: `sk-ant-...` is also a
+            // valid `sk-...`, and `sk-or-v1-...` is too. Whichever of those is
+            // more specific has to win, and a tie is decided by declaration
+            // order, which is not a decision anyone made.
+            Self::AnthropicKey | Self::VendorApiToken => 95,
             Self::AwsAccessKeyId
             | Self::AwsSecretAccessKey
             | Self::GithubToken
@@ -335,8 +340,7 @@ impl EntityKind {
             | Self::GoogleApiKey
             | Self::SendgridKey
             | Self::TwilioKey
-            | Self::NpmToken
-            | Self::VendorApiToken => 90,
+            | Self::NpmToken => 90,
             Self::JwtToken | Self::DatabaseUrl => 85,
             Self::Custom(_) => 80,
             Self::CreditCard | Self::Iban | Self::NationalId | Self::TaxId => 70,

@@ -17,6 +17,7 @@ use rand_chacha::ChaCha12Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::detect::validate;
 use crate::entity::{Category, EntityKind};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -479,6 +480,30 @@ fn vendor_token_like(real: &str, rng: &mut ChaCha12Rng) -> String {
     format!("{prefix}{}", token(rng, alphabet, char_len(tail).max(8)))
 }
 
+/// A taxpayer number that keeps its layout and cannot be one that was issued.
+///
+/// The nine-digit dashed form is the one that matters: a stand-in of random
+/// digits in `ddd-dd-dddd` is, more often than not, a Social Security number
+/// belonging to somebody. Area `9xx` is never an SSN and group `93` is never
+/// an ITIN, so that combination belongs to nobody by construction, which is
+/// the same trick the SSN generator already uses.
+///
+/// The other layouts have no reserved block to aim at. They come back
+/// well-formed and are documented as possibly coinciding with a real number,
+/// because claiming otherwise would be a lie the reader cannot check.
+fn tax_id_like(real: &str, rng: &mut ChaCha12Rng) -> String {
+    let present: Vec<char> = real.chars().filter(char::is_ascii_digit).collect();
+    let dashed_nine = present.len() == 9
+        && real.len() == 11
+        && real.as_bytes().get(3) == Some(&b'-')
+        && real.as_bytes().get(6) == Some(&b'-');
+
+    if dashed_nine {
+        return format!("9{}-93-{}", digits(rng, 2), digits(rng, 4));
+    }
+    layout_like(real, rng)
+}
+
 /// Rebuild an identifier, keeping its digit-and-separator layout.
 ///
 /// A taxpayer number is recognised by its shape as much as its value, so
@@ -497,18 +522,91 @@ fn layout_like(real: &str, rng: &mut ChaCha12Rng) -> String {
         .collect()
 }
 
+/// A national identity number of the same scheme, from a block never issued.
+///
+/// Four schemes share this kind and they look nothing alike, so a single
+/// SSN-shaped stand-in made a NINO come back as an SSN. Each now keeps its own
+/// shape, and each aims at a range its issuing authority does not use: `ZZ`
+/// heads HMRC's own never-issued list, a Canadian SIN never begins with 8, and
+/// an Aadhaar never begins with 0 or 1.
+fn national_id_like(real: &str, rng: &mut ChaCha12Rng) -> String {
+    let compact: String = real.chars().filter(char::is_ascii_alphanumeric).collect();
+    let digit_count = compact.chars().filter(char::is_ascii_digit).count();
+
+    // A NINO: two letters, six digits, one letter.
+    if compact.len() == 9
+        && digit_count == 6
+        && compact.starts_with(|c: char| c.is_ascii_alphabetic())
+    {
+        let separator = if real.contains(' ') { " " } else { "" };
+        let suffix = pick(rng, &["A", "B", "C", "D"]);
+        let body = digits(rng, 6);
+        return format!(
+            "ZZ{separator}{}{separator}{}{separator}{}{separator}{suffix}",
+            &body[0..2],
+            &body[2..4],
+            &body[4..6]
+        );
+    }
+
+    // An NRIC or FIN: one letter, seven digits, one letter. No reserved block
+    // exists, so this keeps the scheme and a correct check letter.
+    if compact.len() == 9 && digit_count == 7 {
+        let prefix = real.chars().next().unwrap_or('S');
+        for _ in 0..64 {
+            let stem = format!("{prefix}{}", digits(rng, 7));
+            if let Some(candidate) = (b'A'..=b'Z')
+                .map(|letter| format!("{stem}{}", char::from(letter)))
+                .find(|candidate| validate::nric(candidate))
+            {
+                return candidate;
+            }
+        }
+        return format!("S{}A", digits(rng, 7));
+    }
+
+    // An Aadhaar: twelve digits, Verhoeff checked, never starting 0 or 1.
+    if digit_count == 12 {
+        let separator = if real.contains(' ') { " " } else { "" };
+        for _ in 0..64 {
+            let body = format!("1{}", digits(rng, 11));
+            if validate::verhoeff(&body) {
+                return format!(
+                    "{}{separator}{}{separator}{}",
+                    &body[0..4],
+                    &body[4..8],
+                    &body[8..12]
+                );
+            }
+        }
+    }
+
+    // A Canadian SIN: nine digits, Luhn checked, never starting 8.
+    if digit_count == 9 && !real.contains('-') {
+        let separator = if real.contains(' ') { " " } else { "" };
+        for _ in 0..64 {
+            let body = format!("8{}", digits(rng, 8));
+            if validate::canadian_sin(&body) {
+                return format!(
+                    "{}{separator}{}{separator}{}",
+                    &body[0..3],
+                    &body[3..6],
+                    &body[6..9]
+                );
+            }
+        }
+    }
+
+    // A US SSN, and the fallback. The 900 block is never issued.
+    format!("9{}-{}-{}", digits(rng, 2), digits(rng, 2), digits(rng, 4))
+}
+
 /// A Brazilian CPF with correct check digits, in the layout it was written in.
 fn cpf_like(real: &str, rng: &mut ChaCha12Rng) -> String {
     let mut digits: Vec<u32> = (0..9).map(|_| rng.random_range(0..10u32)).collect();
-    for length in [9usize, 10] {
-        let sum: u32 = digits[..length]
-            .iter()
-            .enumerate()
-            .map(|(index, digit)| digit * u32::try_from(length + 1 - index).unwrap_or(0))
-            .sum();
-        let remainder = sum % 11;
-        digits.push(if remainder < 2 { 0 } else { 11 - remainder });
-    }
+    let (first, second) = validate::cpf_check_digits(&digits);
+    digits.push(first);
+    digits.push(second);
 
     let mut rendered = digits.iter().map(ToString::to_string).collect::<String>();
     if real.contains('.') {
@@ -557,15 +655,12 @@ fn realistic(kind: &EntityKind, real: &str, rng: &mut ChaCha12Rng) -> String {
             pick(rng, data::STREET_SUFFIXES)
         ),
         EntityKind::DateOfBirth => date_like(real, rng),
-        // The 900 block is never issued, so this cannot collide with a real SSN.
-        EntityKind::NationalId => {
-            format!("9{}-{}-{}", digits(rng, 2), digits(rng, 2), digits(rng, 4))
-        }
+        EntityKind::NationalId => national_id_like(real, rng),
         EntityKind::TaxId => {
-            if crate::detect::validate::cpf(real) {
+            if validate::cpf(real) {
                 cpf_like(real, rng)
             } else {
-                layout_like(real, rng)
+                tax_id_like(real, rng)
             }
         }
         EntityKind::VendorApiToken => vendor_token_like(real, rng),
@@ -708,7 +803,6 @@ fn realistic(kind: &EntityKind, real: &str, rng: &mut ChaCha12Rng) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::validate;
     use crate::fixtures;
 
     fn surrogates() -> Surrogates {
@@ -845,7 +939,6 @@ mod tests {
             (EntityKind::AwsAccessKeyId, fixtures::AWS_ACCESS_KEY_ID),
             (EntityKind::IpV4, "8.8.8.8"),
             (EntityKind::Iban, "GB82WEST12345698765432"),
-            (EntityKind::TaxId, "123-456-789-00001"),
         ] {
             let fake = make(&kind, real);
             let found = detector.scan(&fake);
@@ -898,6 +991,56 @@ mod tests {
         let fake = make(&EntityKind::TaxId, "529.982.247-25");
         assert!(validate::cpf(&fake), "{fake} is not a valid CPF");
         assert!(fake.contains('.'), "{fake} lost its layout");
+    }
+
+    #[test]
+    fn a_taxpayer_stand_in_cannot_be_a_number_anyone_holds() {
+        use crate::detect::Detector;
+        use crate::policy::Policy;
+
+        let detector = Detector::new(Policy::aggressive()).unwrap();
+        for real in ["912-78-1234", "955-92-6677"] {
+            let fake = make(&EntityKind::TaxId, real);
+
+            // Area 9xx is never a Social Security number and group 93 is never
+            // an ITIN, so this belongs to nobody. The detector agreeing that
+            // it is neither is the whole assertion.
+            assert!(fake.starts_with('9'), "{fake} could be an SSN");
+            assert_eq!(&fake[4..6], "93", "{fake} could be an issued ITIN");
+            assert!(
+                detector.scan(&fake).is_empty(),
+                "{fake} is a number the detector would claim as real"
+            );
+        }
+    }
+
+    #[test]
+    fn each_national_scheme_keeps_its_own_shape() {
+        // One SSN-shaped generator for four schemes made a NINO come back as
+        // an SSN, which is neither reversible-looking nor plausible.
+        let nino = make(&EntityKind::NationalId, "AB 12 34 56 C");
+        assert!(nino.starts_with("ZZ"), "{nino} is not NINO-shaped");
+        assert!(nino.ends_with(['A', 'B', 'C', 'D']), "{nino}");
+
+        let nric = make(&EntityKind::NationalId, "S1234567D");
+        assert!(validate::nric(&nric), "{nric} fails its own check letter");
+
+        let aadhaar = make(&EntityKind::NationalId, "2994 1234 5678");
+        assert!(
+            aadhaar.starts_with('1'),
+            "{aadhaar} could be an issued Aadhaar"
+        );
+        assert!(
+            validate::verhoeff(&aadhaar.replace(' ', "")),
+            "{aadhaar} fails Verhoeff"
+        );
+
+        let sin = make(&EntityKind::NationalId, "046 454 286");
+        assert!(sin.starts_with('8'), "{sin} could be an issued SIN");
+        assert!(validate::canadian_sin(&sin), "{sin} fails Luhn");
+
+        let ssn = make(&EntityKind::NationalId, "123-45-6789");
+        assert!(ssn.starts_with('9'), "{ssn} could be an issued SSN");
     }
 
     #[test]

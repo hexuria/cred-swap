@@ -311,6 +311,22 @@ fn build() -> Vec<Rule> {
             true,
         ),
         rule(
+            EntityKind::AwsSecretAccessKey,
+            r#"(?i)aws_?session_?token\s*[:=]\s*["']?([A-Za-z0-9/+=]{100,})"#,
+            1,
+            None,
+            true,
+        ),
+        rule(
+            // The id on its own is twelve bare digits, which is a quantity as
+            // often as it is an account, so it needs the word beside it.
+            EntityKind::AwsAccessKeyId,
+            r"(?i)\baws[ _\-]?account(?:[ _\-]?id)?\b\s*[:=#]?\s*(\d{12})\b",
+            1,
+            None,
+            true,
+        ),
+        rule(
             EntityKind::GithubToken,
             r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{50,}\b",
             0,
@@ -540,7 +556,7 @@ fn build() -> Vec<Rule> {
         rule(
             // A US ITIN: always 9xx, with the group in the ranges the IRS uses.
             EntityKind::TaxId,
-            r"\b9\d{2}-(?:7\d|8[0-8]|9[0-24-9])-\d{4}\b",
+            r"\b9\d{2}-(?:5\d|6[0-5]|7\d|8[0-8]|9[0-24-9])-\d{4}\b",
             0,
             None,
             true,
@@ -582,7 +598,7 @@ fn build() -> Vec<Rule> {
         ),
         rule(
             EntityKind::NationalId,
-            r"\b[STFGM]\d{7}[A-Z]\b",
+            r"\b[STFG]\d{7}[A-Z]\b",
             0,
             Some(is_valid_nric),
             true,
@@ -940,6 +956,164 @@ mod tests {
         }
     }
 
+    /// Every rule the whole table would apply, the way a real scrub does.
+    ///
+    /// The per-kind `capture` helper asks one rule in isolation, so it cannot
+    /// see two rules claiming the same span. That is how an `OpenRouter` token
+    /// came to be reported as an `OpenAI` key: both matched, both at the same
+    /// precedence, and declaration order quietly decided.
+    fn scanned(text: &str) -> Vec<EntityKind> {
+        use crate::detect::Detector;
+        use crate::policy::Policy;
+
+        Detector::new(Policy::aggressive())
+            .expect("the aggressive policy compiles")
+            .scan(text)
+            .into_iter()
+            .map(|finding| finding.kind)
+            .collect()
+    }
+
+    #[test]
+    fn a_prefixed_vendor_token_is_not_claimed_by_a_broader_rule() {
+        // `sk-or-v1-...` is also a valid `sk-...`, so the generic OpenAI rule
+        // matches the identical span. The more specific rule has to win.
+        let openrouter = tok(concat!("sk-or-", "v1-"), "a", 64);
+        assert_eq!(
+            scanned(&openrouter),
+            vec![EntityKind::VendorApiToken],
+            "a vendor token was claimed by a broader rule"
+        );
+
+        // And the two neighbours it sits between still resolve correctly.
+        assert_eq!(
+            scanned(&fixtures::anthropic_key()),
+            vec![EntityKind::AnthropicKey]
+        );
+        assert_eq!(
+            scanned(&fixtures::openai_key()),
+            vec![EntityKind::OpenAiKey]
+        );
+    }
+
+    #[test]
+    fn aws_has_the_shapes_beyond_the_access_key() {
+        assert!(
+            capture(
+                &EntityKind::AwsSecretAccessKey,
+                &format!("aws_session_token = {}", "A".repeat(120))
+            )
+            .is_some()
+        );
+        assert_eq!(
+            capture(&EntityKind::AwsAccessKeyId, "aws_account_id: 123456789012").as_deref(),
+            Some("123456789012")
+        );
+        // Twelve bare digits are a quantity far more often than an account.
+        assert!(
+            capture(
+                &EntityKind::AwsAccessKeyId,
+                "we processed 123456789012 rows"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn the_remaining_vendor_prefixes_are_recognised() {
+        let cases: Vec<(String, &str)> = vec![
+            (tok(concat!("key", "-"), "a", 32), "Mailgun"),
+            (format!("{}-us12", "b".repeat(32)), "Mailchimp"),
+            (tok(concat!("sq0atp", "-"), "c", 22), "Square"),
+            (tok(concat!("glsa", "_"), "d", 32) + "_abcdef01", "Grafana"),
+            (
+                format!("{}.atlasv1.{}", "e".repeat(14), "f".repeat(64)),
+                "Terraform Cloud",
+            ),
+            (tok(concat!("ATATT", "3"), "g", 120), "Atlassian"),
+            (tok(concat!("pypi-AgEIcHlwaS5", "vcmc"), "h", 60), "PyPI"),
+            (
+                format!("pat{}.{}", "i".repeat(14), "0".repeat(64)),
+                "Airtable",
+            ),
+            (
+                format!(
+                    "{}.{}.{}",
+                    "M".to_string() + &"j".repeat(24),
+                    "k".repeat(6),
+                    "l".repeat(30)
+                ),
+                "Discord",
+            ),
+            (format!("123456789:AA{}", "m".repeat(33)), "Telegram"),
+            (
+                format!(
+                    "{}-{}.apps.googleusercontent.com",
+                    "1".repeat(12),
+                    "n".repeat(32)
+                ),
+                "Google OAuth client",
+            ),
+            (tok(concat!("nvapi", "-"), "o", 64), "NVIDIA"),
+            (tok(concat!("fw", "_"), "p", 26), "Fireworks"),
+        ];
+        for (value, vendor) in cases {
+            assert!(
+                capture(&EntityKind::VendorApiToken, &value).is_some(),
+                "{vendor} token was not recognised: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_hash_is_not_mistaken_for_a_vendor_token() {
+        // The riskiest new shapes are bare hex. A commit SHA, an md5 and a
+        // content hash all live in ordinary logs and must not fire.
+        for line in [
+            "commit 0e5c3b1a9f4d2e8c7b6a5f4e3d2c1b0a9f8e7d6c",
+            "md5 d41d8cd98f00b204e9800998ecf8427e",
+            "integrity sha256-47DEQpj8HBSaTImW1jbXbdcB9wLpvhxaEr5r",
+            "the cache key is stale",
+        ] {
+            assert!(
+                capture(&EntityKind::VendorApiToken, line).is_none(),
+                "fired on: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_aadhaar_with_a_valid_checksum_is_caught() {
+        // 2345 6789 0123 fails Verhoeff, so an earlier negative-only test
+        // passed for a reason that had nothing to do with the keyword gate.
+        assert_eq!(
+            capture(&EntityKind::NationalId, "aadhaar 2994 1234 5678").as_deref(),
+            Some("2994 1234 5678")
+        );
+        // A wrong check digit is refused.
+        assert!(capture(&EntityKind::NationalId, "aadhaar 2994 1234 5679").is_none());
+        // And the keyword really is required.
+        assert!(capture(&EntityKind::NationalId, "batch 2994 1234 5678 shipped").is_none());
+    }
+
+    #[test]
+    fn an_itin_covers_every_group_the_irs_issues() {
+        for group in ["50", "65", "70", "88", "90", "92", "94", "99"] {
+            let value = format!("912-{group}-1234");
+            assert!(
+                capture(&EntityKind::TaxId, &value).is_some(),
+                "{value} is an issued ITIN group"
+            );
+        }
+        for group in ["49", "66", "89", "93"] {
+            let value = format!("912-{group}-1234");
+            assert!(
+                capture(&EntityKind::TaxId, &value).is_none(),
+                "{value} is not an issued ITIN group"
+            );
+        }
+    }
+
     #[test]
     fn ordinary_words_are_not_vendor_tokens() {
         for line in [
@@ -1018,7 +1192,7 @@ mod tests {
         assert!(capture(&EntityKind::TaxId, "VAT no GB123456789").is_some());
         assert!(capture(&EntityKind::TaxId, "GB123456789").is_none());
 
-        assert!(capture(&EntityKind::NationalId, "aadhaar 2345 6789 0123").is_none());
+        // Aadhaar's own gate is covered by `an_aadhaar_with_a_valid_checksum_is_caught`.
     }
 
     #[test]
