@@ -189,10 +189,13 @@ fn keep_refuses_to_pass_a_credential_through() {
 #[test]
 fn keep_leaves_the_named_kind_alone() {
     let sandbox = Sandbox::new();
-    let text = "mail dana@corp.com from 203.0.113.9";
+    // Not an address from 203.0.113.0/24: stand-ins come from that range, and
+    // `203.0.113.98` contains `203.0.113.9`, so a substring assertion against
+    // an original inside the range fails for one generated octet in twenty.
+    let text = "mail dana@corp.com from 198.51.100.44";
     let scrubbed = sandbox.stdout(&["scrub", "--keep", "email-address"], text);
     assert!(scrubbed.contains("dana@corp.com"), "{scrubbed}");
-    assert!(!scrubbed.contains("203.0.113.9"), "{scrubbed}");
+    assert!(!scrubbed.contains("198.51.100.44"), "{scrubbed}");
 }
 
 #[test]
