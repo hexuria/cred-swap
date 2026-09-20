@@ -75,6 +75,18 @@ pub enum SessionError {
         source: VaultError,
     },
 
+    /// No seed source: neither a secret nor a root generator was supplied,
+    /// and this build has no operating system to ask.
+    ///
+    /// Only reachable in a build without the `os-rng` feature, such as a
+    /// browser one. Supply [`SessionStoreBuilder::secret`] or
+    /// [`SessionStoreBuilder::root`].
+    #[error(
+        "a session store needs a seed: call `secret` or `root` on the builder, \
+         because this build cannot draw one from the operating system"
+    )]
+    NoSeed,
+
     /// A thread panicked while holding this session's lock.
     ///
     /// The session is not reused after that, because its vault may be half
@@ -564,16 +576,17 @@ impl SessionStoreBuilder {
         crate::detect::Detector::new(self.policy.clone())?;
 
         let style = self.style;
-        let root = self.root.map_or_else(
-            || Surrogates::random(style),
-            |root| {
-                if root.style() == style {
-                    root
-                } else {
-                    Surrogates::from_seed(*root.seed(), style)
-                }
-            },
-        );
+        let root = match self.root {
+            Some(root) if root.style() == style => root,
+            Some(root) => Surrogates::from_seed(*root.seed(), style),
+            // Without a seed source there is nothing safe to fall back to. A
+            // fixed default would make every deployment's stand-ins
+            // reproducible by anyone holding this crate.
+            #[cfg(feature = "os-rng")]
+            None => Surrogates::random(style),
+            #[cfg(not(feature = "os-rng"))]
+            None => return Err(SessionError::NoSeed),
+        };
 
         Ok(SessionStore {
             inner: Arc::new(Inner {
@@ -855,6 +868,13 @@ mod tests {
         store
             .destroy("run-1")
             .expect("destroying twice is not an error");
+    }
+
+    #[cfg(not(feature = "os-rng"))]
+    #[test]
+    fn a_build_without_os_entropy_demands_a_seed() {
+        let error = SessionStore::builder().build().unwrap_err();
+        assert!(matches!(error, SessionError::NoSeed));
     }
 
     #[test]
