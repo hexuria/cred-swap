@@ -250,7 +250,11 @@ if asking.truncated() {
 
 let judged = your_classifier.verdicts(text, &asking);      // the expensive half
 
-let scrubbed = cloak.scrub_findings(text, merge(rules, judged), |_| Decision::Replace);
+let merged = merge(rules, judged);
+if merged.displaced > 0 {
+    // A verdict you paid for lost its span to something else.
+}
+let scrubbed = cloak.scrub_findings(text, merged.findings, |_| Decision::Replace);
 ```
 
 A judged finding is a substitution, not a redaction: it goes in the same vault,
@@ -278,9 +282,12 @@ Nothing in this crate knows what your classifier is. There is no network call,
 no async and no model here; the expensive half belongs to the caller, which is
 also the only place that knows what a false positive costs it.
 
-What it still cannot see: a name in text that is entirely lowercase. The survey
-finds candidates by shape, and an all-lowercase sentence offers none, so there
-is nothing to ask about. Names in any script are visible, capitalised or not.
+Two things it still cannot see. A name in text that is entirely lowercase: the
+survey finds candidates by shape, and an all-lowercase sentence offers none, so
+there is nothing to ask about. And a name in a script outside the eight the
+uncased pass covers, which are Han, Hiragana, Katakana, Hangul, Arabic, Hebrew,
+Thai and Devanagari. Latin, Greek and Cyrillic names are covered by the
+capitalised pass whatever their diacritics.
 
 ### As a library
 

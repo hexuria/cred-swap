@@ -30,6 +30,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::fmt;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -77,7 +78,7 @@ impl Shape {
 /// around it, because that is what a judge needs to answer. It is therefore
 /// exactly as sensitive as the message it came from: send it to a classifier,
 /// do not send it to a log.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Candidate {
     /// The span itself.
     pub text: String,
@@ -94,6 +95,23 @@ pub struct Candidate {
     /// most important field here, and the reason a candidate is not just an
     /// offset pair.
     pub context: String,
+}
+
+impl fmt::Debug for Candidate {
+    /// Shape and position, never the text.
+    ///
+    /// This struct's own doc says to send it to a classifier and not to a log,
+    /// and a derived `Debug` is the easiest possible way to do the thing it
+    /// warns against. `Vault` sets the precedent: print counts, not contents.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Candidate")
+            .field("shape", &self.shape)
+            .field("at", &self.range())
+            .field("chars", &self.text.chars().count())
+            // `text` and `context` are withheld, which is the entire point, so
+            // this is exhaustive in the only sense that matters here.
+            .finish_non_exhaustive()
+    }
 }
 
 impl Candidate {
@@ -115,10 +133,14 @@ impl Candidate {
 /// How widely to cast.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Survey {
-    /// Most candidates to return.
+    /// Most *distinct values* to put forward.
     ///
-    /// A bound, not a target. Judging costs money per candidate, so this is
-    /// what stops one pasted log file from becoming a thousand questions.
+    /// A bound on questions, not on candidates. Every occurrence of an
+    /// afforded value comes back, so the returned list is routinely longer
+    /// than this: five mentions of one name cost one slot and return five
+    /// candidates, because masking one and leaving four teaches the reader the
+    /// name. Judging costs money per distinct value, so this is what stops one
+    /// pasted log file from becoming a thousand questions.
     pub limit: usize,
     /// Characters of surrounding text to carry with each candidate.
     pub context: usize,
@@ -182,18 +204,6 @@ pub struct Surveyed {
 }
 
 impl Surveyed {
-    /// Whether anything was put forward.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.candidates.is_empty()
-    }
-
-    /// How many spans are being asked about.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.candidates.len()
-    }
-
     /// Whether the budget ran out before the message did.
     #[must_use]
     pub const fn truncated(&self) -> bool {
@@ -296,13 +306,18 @@ pub fn candidates(text: &str, found: &[Finding], survey: &Survey) -> Surveyed {
             }
             Shape::OpaqueToken => {
                 raise_captured(text, &OPAQUE, 0, Shape::OpaqueToken, &mut raised);
-                // A run of nothing but digits and separators is `Numeric`.
-                // Leaving it here too would have both shapes claim the span,
-                // and the order they happen to be raised in would decide.
-                raised.retain(|candidate| {
-                    candidate.shape != Shape::OpaqueToken
-                        || candidate.text.chars().any(char::is_alphabetic)
-                });
+                // A run of nothing but digits belongs to `Numeric`, so it
+                // is dropped here to stop both shapes claiming the span and
+                // the raise order deciding. Only when `Numeric` is also being
+                // looked for, though: dropping it when nothing else will pick
+                // it up loses the span altogether, which is what a survey
+                // asked for this shape alone used to do.
+                if survey.shapes.contains(&Shape::Numeric) {
+                    raised.retain(|candidate| {
+                        candidate.shape != Shape::OpaqueToken
+                            || candidate.text.chars().any(char::is_alphabetic)
+                    });
+                }
             }
             Shape::Numeric => raise_captured(text, &NUMERIC, 0, Shape::Numeric, &mut raised),
         }
@@ -702,7 +717,7 @@ mod tests {
             raised.truncated(),
             "a caller could not tell it was truncated"
         );
-        assert_eq!(raised.dropped, 40, "{} raised", raised.len());
+        assert_eq!(raised.dropped, 40, "{} raised", raised.candidates.len());
     }
 
     #[test]
@@ -762,6 +777,40 @@ mod tests {
     }
 
     #[test]
+    fn asking_for_opaque_tokens_alone_does_not_lose_digit_runs() {
+        // A pure digit run belongs to `Numeric`, so it is dropped from the
+        // opaque shape to stop both claiming the span. Dropping it when
+        // `Numeric` is not being looked for lost it altogether.
+        let text = "reference 12345678901234567890 for the claim";
+        let alone = candidates(text, &[], &Survey::only(Shape::OpaqueToken));
+        assert_eq!(
+            texts(&alone),
+            vec!["12345678901234567890"],
+            "the span was dropped by a shape that was not even asked for"
+        );
+
+        // With both shapes asked for, `Numeric` still wins it.
+        let both = raise(text);
+        assert_eq!(shaped(&both, Shape::Numeric), vec!["12345678901234567890"]);
+        assert!(shaped(&both, Shape::OpaqueToken).is_empty());
+    }
+
+    #[test]
+    fn debug_output_does_not_print_the_span_or_its_context() {
+        let raised = raise("approved by Avery Sinclair today");
+        let candidate = raised
+            .candidates
+            .iter()
+            .find(|c| c.text == "Avery Sinclair")
+            .expect("the name is a candidate");
+
+        let rendered = format!("{candidate:?}");
+        assert!(!rendered.contains("Avery"), "{rendered}");
+        assert!(!rendered.contains("approved"), "{rendered}");
+        assert!(rendered.contains("chars"), "{rendered}");
+    }
+
+    #[test]
     fn a_survey_can_ask_for_one_shape_only() {
         let text = "Avery Sinclair set token = aG7xQ92mZk1pLw83Tb";
         let raised = candidates(text, &[], &Survey::only(Shape::ProperNoun));
@@ -777,7 +826,7 @@ mod tests {
     #[test]
     fn offsets_index_the_original_text() {
         let text = "approved by Avery Sinclair today";
-        for candidate in &raise(text) {
+        for candidate in &raise(text).candidates {
             assert_eq!(&text[candidate.range()], candidate.text);
         }
     }
@@ -785,7 +834,7 @@ mod tests {
     #[test]
     fn multibyte_text_is_not_split() {
         let text = "Café — Avery Sinclair signed 🙂 on Tuesday";
-        for candidate in &raise(text) {
+        for candidate in &raise(text).candidates {
             assert_eq!(&text[candidate.range()], candidate.text);
             assert!(text.contains(candidate.context.trim_matches('…')));
         }
@@ -794,7 +843,7 @@ mod tests {
     #[test]
     fn empty_text_raises_nothing() {
         let raised = raise("");
-        assert!(raised.is_empty());
+        assert!(raised.candidates.is_empty());
         assert_eq!(raised.dropped, 0);
     }
 
@@ -817,9 +866,8 @@ mod tests {
             .collect();
         assert_eq!(judged.len(), 1);
 
-        let scrubbed = cloak.scrub_findings(text, super::super::merge(Vec::new(), judged), |_| {
-            crate::Decision::Replace
-        });
+        let merged = super::super::merge(Vec::new(), judged);
+        let scrubbed = cloak.scrub_findings(text, merged.findings, |_| crate::Decision::Replace);
         assert!(!scrubbed.text.contains("Avery Sinclair"));
         assert_eq!(cloak.restore(&scrubbed.text), text);
     }

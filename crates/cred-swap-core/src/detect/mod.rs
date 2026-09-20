@@ -44,8 +44,9 @@ impl Finding {
 
 /// Whether two half-open byte ranges share a byte.
 ///
-/// One definition, because three modules need it and three copies of an
-/// off-by-one are three chances to get it wrong in different directions.
+/// One definition, because both this module and the candidate survey need it,
+/// and two copies of an off-by-one are two chances to get it wrong in
+/// different directions.
 pub(crate) const fn spans_overlap(left: (usize, usize), right: (usize, usize)) -> bool {
     left.0 < right.1 && right.0 < left.1
 }
@@ -276,23 +277,55 @@ fn has_word_boundaries(text: &str, start: usize, end: usize) -> bool {
 ///
 /// The result is safe to hand to [`crate::Cloak::scrub_findings`].
 #[must_use]
-pub fn merge(rules: Vec<Finding>, judged: Vec<Finding>) -> Vec<Finding> {
+pub fn merge(rules: Vec<Finding>, judged: Vec<Finding>) -> Merged {
     // Provenance decides, not the kind table. Precedence ranks how *specific*
     // a pattern is, which says nothing about whether a guess should override a
     // match: a judged `Custom` kind outranks `CreditCard` on that table, so
     // ranking across the two lists would let "this looked like a company name"
     // win over a number that passed the Luhn check.
     let settled = resolve_overlaps(rules);
+    let offered = judged.len();
     let unclaimed: Vec<Finding> = judged
         .into_iter()
         .filter(|candidate| !settled.iter().any(|kept| kept.overlaps(candidate)))
         .collect();
+    let displaced_before = offered - unclaimed.len();
 
     // Within each list precedence still does the work it is good at.
-    let mut all = settled;
-    all.extend(resolve_overlaps(unclaimed));
-    all.sort_by_key(|finding| finding.start);
-    all
+    let kept_count = unclaimed.len();
+    let resolved = resolve_overlaps(unclaimed);
+    let displaced = displaced_before + (kept_count - resolved.len());
+
+    let mut findings = settled;
+    findings.extend(resolved);
+    findings.sort_by_key(|finding| finding.start);
+    Merged {
+        findings,
+        displaced,
+    }
+}
+
+/// What [`merge`] decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    /// The findings to scrub, ordered and non-overlapping.
+    pub findings: Vec<Finding>,
+    /// Judged findings dropped because something else already claimed the span.
+    ///
+    /// Reported for the same reason [`crate::Scrubbed::skipped`] is: a caller
+    /// that paid a classifier for a verdict and then sees it vanish has no
+    /// other way to find out. Usually this is correct and uninteresting, but a
+    /// count that climbs means the judge and the rules keep disagreeing about
+    /// the same spans, which is worth knowing.
+    pub displaced: usize,
+}
+
+impl Merged {
+    /// The findings alone, for a caller that does not care what was displaced.
+    #[must_use]
+    pub fn into_findings(self) -> Vec<Finding> {
+        self.findings
+    }
 }
 
 /// Pick a non-overlapping subset of candidates and sort it by position.
@@ -439,8 +472,9 @@ mod tests {
         }];
 
         let merged = merge(rules, judged);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].kind, EntityKind::EmailAddress);
+        assert_eq!(merged.findings.len(), 1);
+        assert_eq!(merged.findings[0].kind, EntityKind::EmailAddress);
+        assert_eq!(merged.displaced, 1, "the dropped verdict was not reported");
     }
 
     #[test]
@@ -462,8 +496,9 @@ mod tests {
         }];
 
         let merged = merge(rules, judged);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].kind, EntityKind::CreditCard);
+        assert_eq!(merged.findings.len(), 1);
+        assert_eq!(merged.findings[0].kind, EntityKind::CreditCard);
+        assert_eq!(merged.displaced, 1);
     }
 
     #[test]
@@ -484,8 +519,19 @@ mod tests {
         ];
 
         let merged = merge(Vec::new(), judged);
-        assert_eq!(merged.len(), 1, "two judged spans overlapped in the output");
-        assert_eq!(merged[0].kind, EntityKind::Custom("organisation".into()));
+        assert_eq!(
+            merged.findings.len(),
+            1,
+            "two judged spans overlapped in the output"
+        );
+        assert_eq!(
+            merged.findings[0].kind,
+            EntityKind::Custom("organisation".into())
+        );
+        assert_eq!(
+            merged.displaced, 1,
+            "the judged span it lost to went unreported"
+        );
     }
 
     #[test]
@@ -504,8 +550,12 @@ mod tests {
         }];
 
         let merged = merge(rules, judged);
-        assert_eq!(merged.len(), 2);
-        assert!(merged[0].start < merged[1].start, "not in document order");
+        assert_eq!(merged.findings.len(), 2);
+        assert_eq!(merged.displaced, 0);
+        assert!(
+            merged.findings[0].start < merged.findings[1].start,
+            "not in document order"
+        );
     }
 
     #[test]

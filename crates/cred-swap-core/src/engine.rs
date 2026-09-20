@@ -219,8 +219,7 @@ impl Cloak {
     /// result here. The vault, the stand-ins and the restore path are the same
     /// ones the rules use, so a judged finding restores exactly like any other.
     ///
-    /// `findings` must not overlap and must be in document order, which is
-    /// what [`merge`] guarantees. An overlap trips an assertion in a debug
+    /// `findings` should not overlap and should be in document order, which is
     /// what [`merge`] guarantees. A span that overlaps one already applied is
     /// dropped and reported in [`Scrubbed::skipped`], rather than panicking
     /// half way through a rewrite the caller cannot then inspect.
@@ -485,7 +484,9 @@ mod tests {
             .collect();
         assert_eq!(judged.len(), 1, "the name was not put forward");
 
-        let scrubbed = cloak.scrub_findings(original, merge(rules, judged), |_| Decision::Replace);
+        let merged = merge(rules, judged);
+        assert_eq!(merged.displaced, 0);
+        let scrubbed = cloak.scrub_findings(original, merged.findings, |_| Decision::Replace);
 
         assert_eq!(scrubbed.replacements.len(), 2);
         assert!(
