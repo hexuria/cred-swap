@@ -256,7 +256,7 @@ fn kinds_lists_every_rule_with_its_state() {
         .dyn_into::<js_sys::Array>()
         .expect("kinds returns an array");
 
-    assert_eq!(rows.length(), 42);
+    assert_eq!(rows.length(), 44);
 
     let mut saw_enabled_email = false;
     for index in 0..rows.length() {

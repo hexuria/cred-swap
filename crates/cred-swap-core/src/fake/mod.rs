@@ -437,6 +437,92 @@ fn database_url_like(real: &str, rng: &mut ChaCha12Rng) -> String {
     )
 }
 
+/// Rebuild a vendor token, keeping the prefix that names the service.
+///
+/// `shpat_`, `dop_v1_`, `NRAK-`: the part before the last separator near the
+/// front is what tells a reader, a scanner and the service itself what this
+/// is, so it survives. The rest is regenerated at the same length over the
+/// same alphabet, so a stand-in still looks like what it replaced.
+fn vendor_token_like(real: &str, rng: &mut ChaCha12Rng) -> String {
+    let head: String = real.chars().take(12).collect();
+    let split = head.rfind(['_', '-']).map_or_else(
+        || {
+            // No separator: keep a short leading run of letters, which is
+            // how `dapi`, `cio` and `figd` style prefixes are shaped.
+            real.chars()
+                .take_while(char::is_ascii_alphabetic)
+                .count()
+                .min(5)
+        },
+        |index| index + 1,
+    );
+
+    let (prefix, tail) = real.split_at(split.min(real.len()));
+    let alphabet = if tail.is_empty() {
+        data::ALNUM
+    } else if tail
+        .bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        data::HEX_LOWER
+    } else if tail
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        data::UPPER_ALNUM
+    } else if tail.bytes().any(|b| matches!(b, b'-' | b'_')) {
+        data::BASE64_URL
+    } else {
+        data::ALNUM
+    };
+
+    format!("{prefix}{}", token(rng, alphabet, char_len(tail).max(8)))
+}
+
+/// Rebuild an identifier, keeping its digit-and-separator layout.
+///
+/// A taxpayer number is recognised by its shape as much as its value, so
+/// `123-456-789-00001` has to come back as five groups in the same places.
+fn layout_like(real: &str, rng: &mut ChaCha12Rng) -> String {
+    real.chars()
+        .map(|character| {
+            if character.is_ascii_digit() {
+                char::from(b'0' + u8::try_from(rng.random_range(0..10u32)).unwrap_or(0))
+            } else if character.is_ascii_alphabetic() {
+                char::from(data::UPPER_ALNUM[rng.random_range(0..26)])
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// A Brazilian CPF with correct check digits, in the layout it was written in.
+fn cpf_like(real: &str, rng: &mut ChaCha12Rng) -> String {
+    let mut digits: Vec<u32> = (0..9).map(|_| rng.random_range(0..10u32)).collect();
+    for length in [9usize, 10] {
+        let sum: u32 = digits[..length]
+            .iter()
+            .enumerate()
+            .map(|(index, digit)| digit * u32::try_from(length + 1 - index).unwrap_or(0))
+            .sum();
+        let remainder = sum % 11;
+        digits.push(if remainder < 2 { 0 } else { 11 - remainder });
+    }
+
+    let mut rendered = digits.iter().map(ToString::to_string).collect::<String>();
+    if real.contains('.') {
+        rendered = format!(
+            "{}.{}.{}-{}",
+            &rendered[0..3],
+            &rendered[3..6],
+            &rendered[6..9],
+            &rendered[9..11]
+        );
+    }
+    rendered
+}
+
 // ---------------------------------------------------------------------------
 // The kind-to-shape table
 // ---------------------------------------------------------------------------
@@ -475,6 +561,14 @@ fn realistic(kind: &EntityKind, real: &str, rng: &mut ChaCha12Rng) -> String {
         EntityKind::NationalId => {
             format!("9{}-{}-{}", digits(rng, 2), digits(rng, 2), digits(rng, 4))
         }
+        EntityKind::TaxId => {
+            if crate::detect::validate::cpf(real) {
+                cpf_like(real, rng)
+            } else {
+                layout_like(real, rng)
+            }
+        }
+        EntityKind::VendorApiToken => vendor_token_like(real, rng),
         EntityKind::PassportNumber => {
             format!(
                 "X{}",
@@ -751,6 +845,7 @@ mod tests {
             (EntityKind::AwsAccessKeyId, fixtures::AWS_ACCESS_KEY_ID),
             (EntityKind::IpV4, "8.8.8.8"),
             (EntityKind::Iban, "GB82WEST12345698765432"),
+            (EntityKind::TaxId, "123-456-789-00001"),
         ] {
             let fake = make(&kind, real);
             let found = detector.scan(&fake);
@@ -759,6 +854,50 @@ mod tests {
                 "stand-in {fake} for {kind} is not recognised as a {kind}"
             );
         }
+    }
+
+    #[test]
+    fn a_vendor_stand_in_keeps_the_prefix_that_names_the_service() {
+        for (real, prefix) in [
+            (
+                format!("{}{}", concat!("shpat", "_"), "9".repeat(32)),
+                concat!("shpat", "_"),
+            ),
+            (
+                format!("{}{}", concat!("dop", "_v1_"), "0".repeat(64)),
+                concat!("dop", "_v1_"),
+            ),
+            (
+                format!("{}{}", concat!("NRAK", "-"), "H".repeat(27)),
+                concat!("NRAK", "-"),
+            ),
+            (format!("dapi{}", "a".repeat(32)), "dapi"),
+        ] {
+            let fake = make(&EntityKind::VendorApiToken, &real);
+            assert!(fake.starts_with(prefix), "{fake} lost the {prefix} prefix");
+            assert_ne!(fake, real);
+            assert_eq!(fake.len(), real.len(), "{fake} changed length");
+        }
+    }
+
+    #[test]
+    fn a_tax_id_stand_in_keeps_its_layout() {
+        let fake = make(&EntityKind::TaxId, "123-456-789-00001");
+        assert_ne!(fake, "123-456-789-00001");
+        let layout = |value: &str| {
+            value
+                .chars()
+                .map(|c| if c.is_ascii_digit() { 'd' } else { c })
+                .collect::<String>()
+        };
+        assert_eq!(layout(&fake), layout("123-456-789-00001"));
+    }
+
+    #[test]
+    fn a_cpf_stand_in_passes_its_own_checksum() {
+        let fake = make(&EntityKind::TaxId, "529.982.247-25");
+        assert!(validate::cpf(&fake), "{fake} is not a valid CPF");
+        assert!(fake.contains('.'), "{fake} lost its layout");
     }
 
     #[test]

@@ -304,7 +304,7 @@ leaves names, addresses and cards alone, so the snippet still reads. Use
 `--style tagged` when you would rather see `[[EMAIL_ADDRESS_1]]` than a
 plausible substitute.
 
-Run `cred-swap kinds` to see all 42 rules and which are on.
+Run `cred-swap kinds` to see all 44 rules and which are on.
 
 ## Sessions
 
