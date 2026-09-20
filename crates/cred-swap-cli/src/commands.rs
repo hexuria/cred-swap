@@ -48,7 +48,8 @@ impl Session {
 /// contains a pattern that does not compile.
 pub fn open_session(resolved: &Resolved, args: &GlobalArgs) -> Result<Session> {
     let path = crate::session::resolve_vault(args.vault.as_deref(), &resolved.session)?;
-    let vault = Vault::load_or_new(&path, Surrogates::random(resolved.style))?;
+    let vault = Vault::load_or_new(&path, Surrogates::random(resolved.style))
+        .with_context(|| format!("cannot open the session at {}", path.display()))?;
 
     // An existing session's style is a property of the stand-ins already in
     // it. Honouring a conflicting flag would produce a vault with two

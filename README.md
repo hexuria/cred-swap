@@ -15,13 +15,13 @@ $ cat incident.txt
 The charge from dana.reyes@northwind-logistics.com failed. Card
 4242 4242 4242 4242 was declined. Deploy box 198.51.100.44 still has
   aws_secret_access_key = wJalrXU...EXAMPLEKEY
-  DATABASE_URL=postgresql://appuser:s3cr3t@db.prod.internal:5432/orders
+  DATABASE_URL=postgresql://appuser:s3cr3t@db.prod.internal/orders
 
 $ cred-swap scrub incident.txt
 The charge from sloane.gilchrist@vandelay.test failed. Card
 4431 6965 2038 6935 was declined. Deploy box 203.0.113.144 still has
-  aws_secret_access_key = lFX0dQelKiC3zdmWOk6huklzmUhYhjFgTZWpExei
-  DATABASE_URL=postgresql://fable:0LrMblzEd2eEz@db.globex.invalid:5432/oldbridge
+  aws_secret_access_key = lFX0dQelKiC3…ZWpExei
+  DATABASE_URL=postgresql://fable:0LrMblzEd2eEz@db.globex.invalid/oldbridge
     1 × email-address
     1 × credit-card
     1 × ip-v4
@@ -112,6 +112,57 @@ server-sent event is still put back correctly. Your own API key travels in your
 own headers and is never touched; it has to reach the provider for the call to
 work at all.
 
+### In a browser extension
+
+The core compiles to WebAssembly, so a content script can mask a prompt in the
+composer before it is sent and put the real values back in the reply. It is the
+same rule table, not a reimplementation of it.
+
+```console
+wasm-pack build crates/cred-swap-wasm --target web --out-dir pkg --release
+```
+
+```js
+import init, { Cloak } from "./pkg/cred_swap_wasm.js";
+await init();
+
+// The seed lives in the vault. Persist it or every stand-in already sent
+// becomes unrestorable.
+const saved = await browser.storage.local.get("vault");
+const cloak = saved.vault ? Cloak.fromVault(saved.vault) : Cloak.create();
+
+// Show the user what would be replaced, before anything is sent.
+for (const f of cloak.detect(composer.value)) {
+  chips.append(chip(f.kind, f.secret ? mask(f.value) : f.value));
+}
+
+const { text, replacements } = cloak.scrub(composer.value);
+composer.value = text;
+await browser.storage.local.set({ vault: cloak.export() });
+
+// And put the real values back in the reply.
+reply.textContent = cloak.restore(reply.textContent);
+```
+
+`cloak.scrubExcept(text, keptOffsets)` honours chips the user unticked, except
+for credentials, which it replaces regardless. `cloak.restoreStreaming(buffer)`
+is for a reply that arrives a few characters at a time: it returns the text
+that is safe to show and how much of the buffer it consumed, so a stand-in
+split across chunks is still reassembled.
+
+There is a working page at `crates/cred-swap-wasm/demo/index.html`. Serve the
+crate directory over HTTP and open it:
+
+```console
+python3 -m http.server -d crates/cred-swap-wasm 8000
+# then open http://localhost:8000/demo/
+```
+
+The browser build has no operating system to ask for entropy, so it takes its
+seed from `crypto.getRandomValues` and drops the `getrandom` dependency
+entirely. Store the exported vault in the extension's `storage.local`, which
+other sites cannot read, never in a page's own `localStorage`, which they can.
+
 ### As a library
 
 ```rust
@@ -191,7 +242,7 @@ leaves names, addresses and cards alone, so the snippet still reads. Use
 `--style tagged` when you would rather see `[[EMAIL_ADDRESS_1]]` than a
 plausible substitute.
 
-Run `cred-swap kinds` to see all 41 rules and which are on.
+Run `cred-swap kinds` to see all 42 rules and which are on.
 
 ## Sessions
 
@@ -235,11 +286,25 @@ Read this part.
 | `cred-swap-core` | Detection, substitution, the vault. No I/O beyond the vault file. |
 | `cred-swap-proxy` | The HTTP proxy, including streaming restoration. |
 | `cred-swap-cli` | The `cred-swap` binary. |
+| `cred-swap-wasm` | Browser bindings, and the demo page. |
 
 ```console
-cargo test --workspace     # 153 tests
-cargo clippy --workspace --all-targets
+cargo test --workspace
+cargo clippy --workspace --all-targets --all-features
+wasm-pack test --node crates/cred-swap-wasm
 ```
+
+CI runs those on Linux, macOS and Windows, checks the minimum supported Rust
+version, builds the browser package, audits dependencies for advisories, and
+runs `cred-swap` over this repository's own source. That last job has a
+baseline in [`.cred-swap.toml`](.cred-swap.toml): it waives the specific
+synthetic strings the rule tests depend on, by value and with a reason, and
+leaves every rule armed.
+
+Contributions that add a rule should add a case to both sides of it: something
+the rule must catch, and something nearby it must not. The second is the one
+that matters. A rule that fires on ordinary source code gets the whole tool
+switched off.
 
 ## License
 

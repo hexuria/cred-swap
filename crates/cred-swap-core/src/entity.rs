@@ -135,6 +135,13 @@ pub enum EntityKind {
     GenericSecret,
     /// A value assigned to something named like a password.
     PasswordAssignment,
+    /// A long random-looking string with nothing nearby to say what it is.
+    ///
+    /// Off in every preset but `aggressive`: in source code this fires on
+    /// checksums, encoded assets and alphabet constants. It is a separate kind
+    /// from [`EntityKind::GenericSecret`] precisely so that enabling
+    /// keyword-gated secrets does not drag the entropy sweep along with it.
+    HighEntropyString,
 
     /// A user-defined rule from the config file.
     Custom(String),
@@ -184,6 +191,7 @@ impl EntityKind {
         Self::GenericApiKey,
         Self::GenericSecret,
         Self::PasswordAssignment,
+        Self::HighEntropyString,
     ];
 
     /// Stable kebab-case identifier, matching the serde representation.
@@ -231,7 +239,22 @@ impl EntityKind {
             Self::GenericApiKey => "generic-api-key",
             Self::GenericSecret => "generic-secret",
             Self::PasswordAssignment => "password-assignment",
+            Self::HighEntropyString => "high-entropy-string",
             Self::Custom(label) => label.as_str(),
+        }
+    }
+
+    /// The name [`FromStr`] accepts, which for a custom kind carries the
+    /// `custom:` prefix that tells it apart from a built-in.
+    ///
+    /// Use this wherever a kind crosses a boundary and has to come back:
+    /// JSON, a command line flag, a JavaScript object. [`EntityKind::as_str`]
+    /// is for display, and is ambiguous for custom kinds.
+    #[must_use]
+    pub fn qualified_name(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Custom(label) => std::borrow::Cow::Owned(format!("custom:{label}")),
+            other => std::borrow::Cow::Borrowed(other.as_str()),
         }
     }
 
@@ -301,12 +324,20 @@ impl EntityKind {
             Self::JwtToken | Self::DatabaseUrl => 85,
             Self::Custom(_) => 80,
             Self::CreditCard | Self::Iban | Self::NationalId => 70,
+            // Above `PhoneNumber`: a dotted quad such as 198.51.100.44 has ten
+            // digits and dot separators, so it satisfies the phone rule too.
+            // The IPv4 rule is the far stricter of the two — four groups of at
+            // most three digits, each validated to be in range — so where both
+            // match, it is the one that is right.
+            Self::IpV4 => 65,
             Self::EmailAddress | Self::PhoneNumber | Self::CryptoAddress => 60,
             Self::S3Uri | Self::Url => 50,
-            Self::IpV4 | Self::IpV6 | Self::MacAddress | Self::Uuid => 40,
+            Self::IpV6 | Self::MacAddress | Self::Uuid => 40,
             Self::BearerToken | Self::BasicAuth | Self::PasswordAssignment => 35,
             Self::GenericApiKey | Self::GenericSecret => 20,
             Self::Hostname => 15,
+            // Lowest of all: anything with a label beats a guess from shape.
+            Self::HighEntropyString => 10,
             _ => 30,
         }
     }
@@ -358,7 +389,7 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(before, names.len(), "duplicate entity kind identifier");
-        assert_eq!(before, 41);
+        assert_eq!(before, 42);
     }
 
     #[test]
@@ -381,6 +412,20 @@ mod tests {
             EntityKind::Custom("codename".into())
         );
         assert!("custom:".parse::<EntityKind>().is_err());
+    }
+
+    #[test]
+    fn every_qualified_name_parses_back_to_its_kind() {
+        for kind in EntityKind::BUILTIN {
+            let name = kind.qualified_name();
+            assert_eq!(&name.parse::<EntityKind>().unwrap(), kind, "{name}");
+        }
+        let custom = EntityKind::Custom("codename".into());
+        assert_eq!(custom.qualified_name(), "custom:codename");
+        assert_eq!(
+            custom.qualified_name().parse::<EntityKind>().unwrap(),
+            custom
+        );
     }
 
     #[test]

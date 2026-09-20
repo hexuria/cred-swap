@@ -5,3 +5,7 @@
 # Vault files hold every real value next to its stand-in. Never commit one.
 *.cred-swap.json
 /sessions
+
+# wasm-pack output. Build it with:
+#   wasm-pack build crates/cred-swap-wasm --target web --out-dir pkg --release
+/crates/cred-swap-wasm/pkg

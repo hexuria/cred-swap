@@ -81,6 +81,12 @@ impl Surrogates {
     }
 
     /// Draw a fresh seed from the operating system.
+    ///
+    /// Requires the `os-rng` feature, which is on by default. A build without
+    /// it — a browser build, say — has no OS entropy to draw on and must get
+    /// its seed from the host instead, through [`Surrogates::from_seed`] or
+    /// [`Surrogates::from_secret`].
+    #[cfg(feature = "os-rng")]
     #[must_use]
     pub fn random(style: Style) -> Self {
         let mut seed = [0u8; 32];
@@ -551,7 +557,9 @@ fn realistic(kind: &EntityKind, real: &str, rng: &mut ChaCha12Rng) -> String {
             token(rng, data::BASE64_URL, char_len(real).clamp(24, 64))
         }
         EntityKind::GenericApiKey => token(rng, data::ALNUM, char_len(real).clamp(16, 48)),
-        EntityKind::GenericSecret => token(rng, data::BASE64_URL, char_len(real).clamp(16, 48)),
+        EntityKind::GenericSecret | EntityKind::HighEntropyString => {
+            token(rng, data::BASE64_URL, char_len(real).clamp(16, 48))
+        }
         EntityKind::PasswordAssignment => format!(
             "{}-{}-{}",
             pick(rng, data::STREET_NAMES).to_ascii_lowercase(),

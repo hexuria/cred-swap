@@ -4,12 +4,21 @@ members = [
     "crates/cred-swap-core",
     "crates/cred-swap-cli",
     "crates/cred-swap-proxy",
+    "crates/cred-swap-wasm",
+]
+
+# `cargo build` and `cargo test` at the root skip the browser crate: it only
+# does anything useful on wasm32, and building it for the host wastes time.
+default-members = [
+    "crates/cred-swap-core",
+    "crates/cred-swap-cli",
+    "crates/cred-swap-proxy",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/codeitlikemiley/cred-swap"
 authors = ["cred-swap contributors"]
@@ -17,6 +26,11 @@ authors = ["cred-swap contributors"]
 [workspace.dependencies]
 cred-swap-core = { path = "crates/cred-swap-core", version = "0.1.0" }
 cred-swap-proxy = { path = "crates/cred-swap-proxy", version = "0.1.0" }
+
+js-sys = "0.3"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2.126"
+wasm-bindgen-test = "0.3"
 
 aho-corasick = "1.1"
 anyhow = "1.0"
@@ -32,9 +46,18 @@ http-body-util = "0.1"
 hyper = "1.6"
 hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 once_cell = "1.20"
-rand = "0.9"
+rand = { version = "0.9", default-features = false }
 rand_chacha = "0.9"
-regex = "1.11"
+# Unicode tables dominate the WebAssembly binary. The rule table is entirely
+# ASCII, so only the classes that change how `\b`, `\w` and `(?i)` behave on
+# real text are kept; the script, age, segmentation and general-category tables
+# are not. The full test suite is the check that this is safe.
+regex = { version = "1.11", default-features = false, features = [
+    "std",
+    "perf",
+    "unicode-case",
+    "unicode-perl",
+] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

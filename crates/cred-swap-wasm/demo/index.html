@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cred-swap in the browser</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #fff; --ink: #1c1b19; --muted: #6b6864;
+    --line: #e3e0dc; --accent: #7c4a24; --secret: #9b2c2c; --ok: #2f6b3a;
+    --chip: #f2efeb;
+    color-scheme: light dark;
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --bg: #171614; --panel: #1f1e1b; --ink: #ece9e4; --muted: #9a958e;
+      --line: #322f2b; --accent: #d9a273; --secret: #e08585; --ok: #86c095;
+      --chip: #2a2825;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #171614; --panel: #1f1e1b; --ink: #ece9e4; --muted: #9a958e;
+    --line: #322f2b; --accent: #d9a273; --secret: #e08585; --ok: #86c095;
+    --chip: #2a2825;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    padding: 32px 16px 64px;
+  }
+  main { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px;
+  }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.09em;
+       color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  textarea, pre {
+    width: 100%; background: transparent; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    font: 13px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; margin: 0;
+  }
+  textarea { min-height: 160px; resize: vertical; }
+  pre { min-height: 40px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 10px; font-size: 12px; display: inline-flex; gap: 6px; align-items: baseline;
+  }
+  .chip .k { color: var(--muted); font-size: 11px; }
+  .chip.secret { border-color: var(--secret); }
+  .chip.secret .k { color: var(--secret); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.07em; padding: 0 8px 6px 0; }
+  td { padding: 5px 8px 5px 0; border-top: 1px solid var(--line);
+       font-family: ui-monospace, Menlo, monospace; vertical-align: top;
+       word-break: break-all; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  button, select {
+    font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  .verdict { font-size: 13px; }
+  .verdict.ok { color: var(--ok); }
+  .verdict.bad { color: var(--secret); }
+  code { background: var(--chip); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  footer { color: var(--muted); font-size: 12.5px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>cred-swap in the browser</h1>
+  <p class="sub">
+    The same rule table the command line uses, compiled to WebAssembly. Nothing here
+    touches the network &mdash; type a real secret if you like, it stays on this page.
+  </p>
+
+  <div class="row">
+    <label>Policy
+      <select id="policy">
+        <option value="standard">standard</option>
+        <option value="secrets">secrets only</option>
+        <option value="aggressive">aggressive</option>
+      </select>
+    </label>
+    <label>Style
+      <select id="style">
+        <option value="realistic">realistic</option>
+        <option value="tagged">tagged</option>
+      </select>
+    </label>
+    <button id="run" class="primary">Scrub</button>
+    <button id="reset">New session</button>
+    <span id="status" class="verdict"></span>
+  </div>
+
+  <div class="panel">
+    <h2>What you would send</h2>
+    <textarea id="input" spellcheck="false"></textarea>
+  </div>
+
+  <div class="panel">
+    <h2>What was found</h2>
+    <div id="chips" class="chips"></div>
+  </div>
+
+  <div class="panel">
+    <h2>What the model would see</h2>
+    <pre id="output"></pre>
+  </div>
+
+  <div class="panel">
+    <h2>Round trip &mdash; the reply, with your values put back</h2>
+    <pre id="restored"></pre>
+    <p id="verdict" class="verdict"></p>
+  </div>
+
+  <div class="panel">
+    <h2>Vault</h2>
+    <table>
+      <thead><tr><th>Kind</th><th>Original</th><th>Stand-in</th></tr></thead>
+      <tbody id="vault"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    An extension would persist <code>cloak.export()</code> in
+    <code>storage.local</code> and reload it with <code>Cloak.fromVault()</code>.
+  </footer>
+</main>
+
+<script type="module">
+import init, { Cloak, version } from "../pkg/cred_swap_wasm.js";
+
+const SAMPLE = `Hi Dr. Sarah Jensen,
+
+The charge from dana.reyes@northwind-logistics.com failed again. Card
+4242 4242 4242 4242 was declined; the customer's SSN 123-45-6789 is on file
+at 1420 Hawthorn Avenue.
+
+Our deploy box 198.51.100.44 still has:
+  aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  DATABASE_URL=postgresql://appuser:s3cr3t-p4ssw0rd@db.prod.internal:5432/orders
+  password = "correct-horse-battery"
+
+Please call +1 415 867 5309 to confirm.`;
+
+const $ = (id) => document.getElementById(id);
+let cloak = null;
+
+function options() {
+  return { policy: $("policy").value, style: $("style").value };
+}
+
+function newSession() {
+  cloak = Cloak.create(options());
+  $("chips").textContent = "";
+  $("output").textContent = "";
+  $("restored").textContent = "";
+  $("verdict").textContent = "";
+  $("vault").textContent = "";
+}
+
+function run() {
+  const text = $("input").value;
+
+  // What a review card would show before anything is sent.
+  const findings = cloak.detect(text);
+  $("chips").replaceChildren(...findings.map((f) => {
+    const el = document.createElement("span");
+    el.className = "chip" + (f.secret ? " secret" : "");
+    el.innerHTML = `<span class="k">${f.kind}</span>`;
+    el.append(f.secret ? `${f.value.slice(0, 4)}…` : f.value);
+    return el;
+  }));
+  if (findings.length === 0) $("chips").textContent = "Nothing found.";
+
+  const { text: scrubbed } = cloak.scrub(text);
+  $("output").textContent = scrubbed;
+
+  // Stand in for a model reply that quotes what it was given.
+  const restored = cloak.restore(scrubbed);
+  $("restored").textContent = restored;
+
+  const identical = restored === text;
+  $("verdict").textContent = identical
+    ? "Round trip is byte-identical to the original."
+    : "Round trip did NOT match the original.";
+  $("verdict").className = "verdict " + (identical ? "ok" : "bad");
+
+  $("vault").replaceChildren(...cloak.entries().map((e) => {
+    const tr = document.createElement("tr");
+    for (const cell of [e.kind, e.secret ? `${e.real.slice(0, 4)}… (${e.real.length})` : e.real, e.fake]) {
+      const td = document.createElement("td");
+      td.textContent = cell;
+      tr.append(td);
+    }
+    return tr;
+  }));
+}
+
+await init();
+$("input").value = SAMPLE;
+newSession();
+$("status").textContent = `cred-swap ${version()} ready`;
+$("status").className = "verdict ok";
+
+$("run").addEventListener("click", run);
+$("reset").addEventListener("click", newSession);
+for (const id of ["policy", "style"]) {
+  $(id).addEventListener("change", () => { newSession(); run(); });
+}
+run();
+</script>
+</body>
+</html>

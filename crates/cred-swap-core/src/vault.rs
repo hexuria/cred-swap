@@ -40,7 +40,7 @@ pub struct Entry {
     pub hits: u64,
 }
 
-/// Something went wrong reading or writing the vault file.
+/// Something went wrong reading or writing a vault.
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
     /// The file could not be read or written.
@@ -52,22 +52,19 @@ pub enum VaultError {
         #[source]
         source: io::Error,
     },
-    /// The file is not valid JSON, or not a vault.
-    #[error("vault at {path} is corrupt or not a cred-swap vault")]
-    Malformed {
-        /// The path involved.
-        path: String,
-        /// The parse failure.
-        #[source]
-        source: serde_json::Error,
+    /// The data is not valid JSON, or not a vault.
+    #[error("vault data is corrupt or not a cred-swap vault: {reason}")]
+    Decode {
+        /// What went wrong, in enough detail to act on.
+        reason: String,
     },
-    /// The file was written by an incompatible version.
-    #[error("vault at {path} uses format version {found}, this build understands {FORMAT_VERSION}")]
+    /// The vault was written by an incompatible version.
+    #[error("vault uses format version {found}, this build understands {expected}")]
     UnsupportedVersion {
-        /// The path involved.
-        path: String,
-        /// The version found in the file.
+        /// The version found in the data.
         found: u32,
+        /// The version this build writes and reads.
+        expected: u32,
     },
 }
 
@@ -399,11 +396,6 @@ impl Vault {
     ///
     /// Returns an error if the parent directory cannot be created or the file
     /// cannot be written.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the vault cannot be serialized. Its contents are strings and
-    /// integers, so this cannot happen.
     pub fn save(&self, path: &Path) -> Result<(), VaultError> {
         let io_err = |source: io::Error| VaultError::Io {
             path: path.display().to_string(),
@@ -416,14 +408,7 @@ impl Vault {
             fs::create_dir_all(parent).map_err(io_err)?;
         }
 
-        let file = VaultFile {
-            version: FORMAT_VERSION,
-            seed: to_hex(self.surrogates.seed()),
-            style: self.surrogates.style(),
-            entries: self.entries.clone(),
-        };
-        let encoded = serde_json::to_vec_pretty(&file)
-            .expect("vault contents are plain strings and always serialize");
+        let encoded = self.to_json().into_bytes();
 
         // Create the file with restrictive permissions before any bytes land
         // in it, rather than writing first and tightening afterwards.
@@ -450,23 +435,53 @@ impl Vault {
             path: path.display().to_string(),
             source,
         })?;
-        let file: VaultFile =
-            serde_json::from_slice(&bytes).map_err(|source| VaultError::Malformed {
-                path: path.display().to_string(),
-                source,
-            })?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| VaultError::Decode {
+            reason: format!("{} is not UTF-8", path.display()),
+        })?;
+        Self::from_json(text)
+    }
+
+    /// Serialize the vault, for a host that keeps it somewhere other than a
+    /// file: browser extension storage, a keychain, a database row.
+    ///
+    /// The result holds every real value next to its stand-in, and the seed
+    /// that links them. Treat it exactly as you would the secrets inside it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the vault cannot be serialized. Its contents are strings and
+    /// integers, so this cannot happen.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let file = VaultFile {
+            version: FORMAT_VERSION,
+            seed: to_hex(self.surrogates.seed()),
+            style: self.surrogates.style(),
+            entries: self.entries.clone(),
+        };
+        serde_json::to_string_pretty(&file)
+            .expect("vault contents are plain strings and always serialize")
+    }
+
+    /// Rebuild a vault from [`Vault::to_json`] output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the text is not a vault, or was written by an
+    /// incompatible version.
+    pub fn from_json(text: &str) -> Result<Self, VaultError> {
+        let file: VaultFile = serde_json::from_str(text).map_err(|source| VaultError::Decode {
+            reason: source.to_string(),
+        })?;
         if file.version != FORMAT_VERSION {
             return Err(VaultError::UnsupportedVersion {
-                path: path.display().to_string(),
                 found: file.version,
+                expected: FORMAT_VERSION,
             });
         }
 
-        let seed = from_hex(&file.seed).ok_or_else(|| VaultError::Malformed {
-            path: path.display().to_string(),
-            source: <serde_json::Error as serde::de::Error>::custom(
-                "seed is not 32 hex-encoded bytes",
-            ),
+        let seed = from_hex(&file.seed).ok_or_else(|| VaultError::Decode {
+            reason: "seed is not 32 hex-encoded bytes".to_owned(),
         })?;
 
         let mut vault = Self::new(Surrogates::from_seed(seed, file.style));
@@ -719,7 +734,7 @@ mod tests {
         fs::write(&path, b"{ not json").unwrap();
         let error =
             Vault::load_or_new(&path, Surrogates::from_secret(b"s", Style::Realistic)).unwrap_err();
-        assert!(matches!(error, VaultError::Malformed { .. }));
+        assert!(matches!(error, VaultError::Decode { .. }));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -863,6 +878,31 @@ mod tests {
         assert_eq!(vault.longest_surrogate(), key.len().max(fake.len()));
         assert!(vault.is_surrogate(&key));
         assert!(!vault.is_surrogate("something else"));
+    }
+
+    #[test]
+    fn a_vault_round_trips_through_json_without_touching_a_file() {
+        let mut original = vault();
+        let fake = original.substitute(&EntityKind::EmailAddress, "dana@corp.com");
+
+        let mut reloaded = Vault::from_json(&original.to_json()).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert_eq!(reloaded.restore(&fake), "dana@corp.com");
+        assert_eq!(
+            reloaded.substitute(&EntityKind::EmailAddress, "other@corp.com"),
+            original.substitute(&EntityKind::EmailAddress, "other@corp.com"),
+            "the seed did not survive the round trip"
+        );
+    }
+
+    #[test]
+    fn a_future_format_version_is_refused_rather_than_misread() {
+        let json = r#"{"version": 99, "seed": "00", "entries": []}"#;
+        let error = Vault::from_json(json).unwrap_err();
+        assert!(matches!(
+            error,
+            VaultError::UnsupportedVersion { found: 99, .. }
+        ));
     }
 
     #[test]

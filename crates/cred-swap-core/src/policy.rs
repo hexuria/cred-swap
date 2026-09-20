@@ -5,7 +5,12 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::detect::patterns::RULES;
-use crate::entity::{Category, EntityKind};
+use crate::entity::EntityKind;
+
+/// Returned when a preset name is not recognised.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown policy `{0}`, expected standard, secrets, aggressive or none")]
+pub struct UnknownPreset(pub String);
 
 /// A literal string the user always wants replaced, regardless of shape.
 ///
@@ -86,12 +91,36 @@ impl Policy {
     #[must_use]
     pub fn secrets_only() -> Self {
         Self {
-            enabled: EntityKind::BUILTIN
+            // Built from the rule table rather than from the kind list, so a
+            // kind whose only rule is off by default stays off. Otherwise
+            // asking for "credentials" would quietly switch on the unlabelled
+            // entropy sweep, which in source code fires on every checksum and
+            // alphabet constant in the tree.
+            enabled: RULES
                 .iter()
-                .filter(|kind| kind.category() == Category::Credential)
-                .cloned()
+                .filter(|rule| rule.default_on && rule.kind.is_secret())
+                .map(|rule| rule.kind.clone())
                 .collect(),
             ..Self::empty()
+        }
+    }
+
+    /// Build a policy from a preset name.
+    ///
+    /// The names are the shared vocabulary between the command line, the
+    /// config file and the browser build, so they live here rather than in any
+    /// one of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the list of valid names if `name` is not one of them.
+    pub fn from_preset(name: &str) -> Result<Self, UnknownPreset> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "standard" | "default" => Ok(Self::default()),
+            "secrets" => Ok(Self::secrets_only()),
+            "aggressive" => Ok(Self::aggressive()),
+            "none" => Ok(Self::empty()),
+            _ => Err(UnknownPreset(name.to_owned())),
         }
     }
 
@@ -170,7 +199,39 @@ mod tests {
         assert!(policy.is_enabled(&EntityKind::GithubToken));
         assert!(policy.is_enabled(&EntityKind::DatabaseUrl));
         assert!(!policy.is_enabled(&EntityKind::EmailAddress));
+        assert!(
+            !policy.is_enabled(&EntityKind::HighEntropyString),
+            "asking for credentials should not turn on the entropy sweep"
+        );
         assert!(!policy.is_enabled(&EntityKind::CreditCard));
+    }
+
+    #[test]
+    fn preset_names_map_to_the_right_policies() {
+        assert!(
+            Policy::from_preset("standard")
+                .unwrap()
+                .is_enabled(&EntityKind::EmailAddress)
+        );
+        assert!(
+            !Policy::from_preset("secrets")
+                .unwrap()
+                .is_enabled(&EntityKind::EmailAddress)
+        );
+        assert!(
+            Policy::from_preset("aggressive")
+                .unwrap()
+                .is_enabled(&EntityKind::Url)
+        );
+        assert!(Policy::from_preset("none").unwrap().enabled.is_empty());
+        assert!(
+            Policy::from_preset("Standard").is_ok(),
+            "names are case-insensitive"
+        );
+
+        let error = Policy::from_preset("paranoid").unwrap_err().to_string();
+        assert!(error.contains("paranoid"), "{error}");
+        assert!(error.contains("aggressive"), "{error}");
     }
 
     #[test]

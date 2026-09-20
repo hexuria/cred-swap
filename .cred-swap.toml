@@ -1,0 +1,37 @@
+# cred-swap scanning itself.
+#
+# CI runs the built binary over this repository's own source. A project whose
+# job is to recognise credential-shaped strings is, by construction, full of
+# them: the rule table contains the patterns, the tests contain values that
+# must be detected or the tests are not testing anything.
+#
+# So this file is a baseline, not a mute button. Every waiver below names one
+# specific string and says why. Every rule stays armed, so a credential that
+# has not been waived here still fails the build.
+
+policy = "secrets"
+
+allow = [
+  # The rule table quotes the pattern it is looking for. A file that defines
+  # what a private key looks like necessarily contains what a private key
+  # looks like.
+  '-----BEGIN OPENSSH PRIVATE KEY-----.*?-----END OPENSSH PRIVATE KEY-----',
+
+  # Synthetic PEM blocks used to check that multi-line matching works. The
+  # bodies are the literal text `abc` and a format placeholder.
+  '-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----',
+  '-----BEGIN RSA PRIVATE KEY-----\n{}\n{}\n-----END RSA PRIVATE KEY-----',
+
+  # Invented values in the rule tests. Each one exists to assert that a rule
+  # fires, so they cannot be removed and must not fail the build.
+  'hunter2swordfish',
+  '8fj2Kd93ldMzQ01x',
+  'aG7xQ92mZk1pLw83',
+  'tr0ub4dor-and-3',
+
+  # The README's worked example. Showing what a connection string looks like
+  # going in and coming out is the whole point of that example; the host is a
+  # reserved domain and the password is invented.
+  'postgresql://appuser:s3cr3t@db.prod.internal/orders',
+  'postgresql://fable:0LrMblzEd2eEz@db.globex.invalid/oldbridge',
+]

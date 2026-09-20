@@ -65,5 +65,5 @@ pub use detect::{Detector, DetectorError, Finding};
 pub use engine::{Cloak, Decision, Replacement, Scrubbed};
 pub use entity::{Category, EntityKind};
 pub use fake::{Style, Surrogates};
-pub use policy::{CustomPattern, Policy, Term};
+pub use policy::{CustomPattern, Policy, Term, UnknownPreset};
 pub use vault::{Entry, Vault, VaultError};

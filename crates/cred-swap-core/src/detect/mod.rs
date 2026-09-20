@@ -305,6 +305,22 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_quad_is_an_address_not_a_phone_number() {
+        // 198.51.100.44 is ten digits separated by dots, which also satisfies
+        // the phone rule. The address reading is the correct one.
+        for text in ["198.51.100.44", "203.0.113.128", "192.168.100.200"] {
+            assert_eq!(kinds(text), vec![EntityKind::IpV4], "{text}");
+        }
+    }
+
+    #[test]
+    fn a_dotted_phone_number_is_still_a_phone_number() {
+        // Three groups, and a final group too long to be an octet, so the
+        // address rule cannot claim it.
+        assert_eq!(kinds("415.867.5309"), vec![EntityKind::PhoneNumber]);
+    }
+
+    #[test]
     fn offsets_index_the_original_text() {
         let text = "contact: alice@corp.dev";
         let found = scan(text);

@@ -96,24 +96,18 @@ pub struct Resolved {
 ///
 /// Returns an error if any kind name is not recognised.
 pub fn resolve(config: &Config, args: &GlobalArgs) -> Result<Resolved> {
-    let preset = match args.policy {
-        Some(preset) => preset,
+    let mut policy = match args.policy {
+        Some(PolicyPreset::Standard) => Policy::default(),
+        Some(PolicyPreset::Secrets) => Policy::secrets_only(),
+        Some(PolicyPreset::Aggressive) => Policy::aggressive(),
+        Some(PolicyPreset::None) => Policy::empty(),
+        // The preset names in a config file are the same vocabulary the
+        // browser build uses, so core owns them.
         None => match config.policy.as_deref() {
-            None | Some("standard" | "default") => PolicyPreset::Standard,
-            Some("secrets") => PolicyPreset::Secrets,
-            Some("aggressive") => PolicyPreset::Aggressive,
-            Some("none") => PolicyPreset::None,
-            Some(other) => bail!(
-                "config sets policy = \"{other}\", expected standard, secrets, aggressive or none"
-            ),
+            None => Policy::default(),
+            Some(name) => Policy::from_preset(name)
+                .map_err(|error| anyhow::anyhow!("config sets policy = \"{name}\": {error}"))?,
         },
-    };
-
-    let mut policy = match preset {
-        PolicyPreset::Standard => Policy::default(),
-        PolicyPreset::Secrets => Policy::secrets_only(),
-        PolicyPreset::Aggressive => Policy::aggressive(),
-        PolicyPreset::None => Policy::empty(),
     };
 
     for name in config.enable.iter().chain(args.enable.iter()) {

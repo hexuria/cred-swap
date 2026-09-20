@@ -1,0 +1,42 @@
+[package]
+name = "cred-swap-wasm"
+description = "Browser bindings for cred-swap: the same detection rules, running on the page."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No default features: a browser has no OS entropy source, and `getrandom`
+# does not build for wasm32-unknown-unknown without extra configuration.
+# Seeds come from the Web Crypto API instead, via `newSeed`.
+# Not inherited from the workspace: a member cannot turn off a default
+# feature the workspace enabled.
+cred-swap-core = { path = "../cred-swap-core", version = "0.1.0", default-features = false }
+
+js-sys.workspace = true
+serde = { workspace = true }
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+js-sys.workspace = true
+wasm-bindgen-test.workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = [
+    "-Oz",
+    # The features rustc now emits for wasm32 by default. Without these listed,
+    # wasm-opt rejects its own input as using disallowed features.
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-multivalue",
+    "--enable-reference-types",
+]

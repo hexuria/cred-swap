@@ -28,7 +28,7 @@ pub fn luhn(candidate: &str) -> bool {
             }
         })
         .sum();
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Verify an IBAN against the ISO 13616 mod-97 checksum.
@@ -78,7 +78,7 @@ pub fn aba_routing(candidate: &str) -> bool {
         .zip(weights)
         .map(|(digit, weight)| digit * weight)
         .sum();
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Shannon entropy of the candidate in bits per character.

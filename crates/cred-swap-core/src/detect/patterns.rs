@@ -80,14 +80,81 @@ fn is_placeholder(value: &str) -> bool {
     DEAD_GIVEAWAYS.iter().any(|needle| lowered.contains(needle))
 }
 
+/// Values that are the gating keyword said back, not a secret.
+///
+/// `Credential => "credential"` and `"secret": isSecret` are ordinary lines of
+/// code that happen to sit next to the word a keyword-gated rule looks for.
+const KEYWORD_ECHOES: &[&str] = &[
+    "secret",
+    "secrets",
+    "credential",
+    "credentials",
+    "password",
+    "passwords",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "token",
+    "tokens",
+    "apikey",
+    "api_key",
+    "key",
+    "keys",
+    "value",
+    "string",
+    "text",
+    "true",
+    "false",
+    "default",
+    "enabled",
+    "disabled",
+    "required",
+    "optional",
+];
+
+/// Reject a capture that is a fragment of source code rather than a value.
+///
+/// Keyword-gated rules read `name = value`, which is also the shape of half
+/// the lines in any program. Without this, scanning a codebase reports
+/// `secrets = findings.iter().filter(|f| ...` as a leaked credential, and a
+/// report full of those is a report nobody reads.
+fn looks_like_code(value: &str) -> bool {
+    value.contains("::")
+        || value.contains("()")
+        || value.contains("=>")
+        || value.contains('|')
+        || value.contains("${")
+        || value.contains("&&")
+        || value.ends_with('(')
+        || value.ends_with('.')
+        || value.ends_with("--")
+}
+
+/// Reject a capture that is a bare identifier.
+///
+/// `secret: isSecret` and `password: userPassword` are how code passes a
+/// value around, not how it writes one down. A real passphrase of this length
+/// almost always carries a digit or a separator; an identifier does not.
+fn looks_like_identifier(value: &str) -> bool {
+    value.len() < 20 && value.bytes().all(|byte| byte.is_ascii_alphabetic())
+}
+
+/// Shared gate for every keyword-gated rule.
+fn is_credible_value(value: &str) -> bool {
+    !is_placeholder(value)
+        && !looks_like_code(value)
+        && !looks_like_identifier(value)
+        && !KEYWORD_ECHOES.contains(&value.trim().to_ascii_lowercase().as_str())
+}
+
 /// A keyword-gated secret: real enough to be worth replacing.
 fn is_real_secret(value: &str) -> bool {
-    !is_placeholder(value) && value.len() >= 8
+    is_credible_value(value) && value.len() >= 8
 }
 
 /// A generic key: keyword-gated, so entropy is a tiebreak rather than a gate.
 fn is_real_key(value: &str) -> bool {
-    !is_placeholder(value) && value.len() >= 12
+    is_credible_value(value) && value.len() >= 12
 }
 
 /// A US Social Security Number that the SSA would actually issue.
@@ -320,7 +387,7 @@ fn build() -> Vec<Rule> {
         ),
         rule(
             EntityKind::PasswordAssignment,
-            r#"(?i)\b(?:password|passwd|pwd|passphrase)\b["']?\s*[:=]>?\s*["']?([^\s"'`,;]{6,})"#,
+            r#"(?i)(?:password|passwd|pwd|passphrase)\b["']?\s*[:=]>?\s*["']?([^\s"'`,;]{6,})"#,
             1,
             Some(is_real_secret),
             true,
@@ -489,7 +556,7 @@ fn build() -> Vec<Rule> {
         // Off by default; `--aggressive` turns it on.
         // ---------------------------------------------------------------
         rule(
-            EntityKind::GenericSecret,
+            EntityKind::HighEntropyString,
             r"\b[A-Za-z0-9+/]{32,}={0,2}\b",
             0,
             Some(is_random_enough),
@@ -569,6 +636,60 @@ mod tests {
         );
         assert!(capture(&EntityKind::GenericApiKey, "api_key = YOUR_API_KEY_HERE").is_none());
         assert!(capture(&EntityKind::PasswordAssignment, "password: ********").is_none());
+    }
+
+    #[test]
+    fn source_code_is_not_mistaken_for_a_secret() {
+        // Every one of these is a real line from this repository that an
+        // earlier version of the rules reported as a leaked credential.
+        for line in [
+            r#""secret": kind.is_secret(),"#,
+            r#""secret": isSecret,"#,
+            r"password: userPassword,",
+            r"let secrets = findings.iter().filter(|f| f.kind.is_secret()).count();",
+            r#"Self::Credential => "credential","#,
+            r#""secrets" => Ok(Self::secrets_only()),"#,
+            r"password: self.config.password.clone(),",
+        ] {
+            for kind in [
+                EntityKind::GenericSecret,
+                EntityKind::GenericApiKey,
+                EntityKind::PasswordAssignment,
+            ] {
+                assert!(
+                    capture(&kind, line).is_none(),
+                    "{kind} fired on source code: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn real_assignments_are_still_caught() {
+        assert!(
+            capture(
+                &EntityKind::PasswordAssignment,
+                r#"password = "hunter2swordfish""#
+            )
+            .is_some()
+        );
+        // `client_secret` has no word boundary before `secret`, so it is the
+        // API-key rule that owns it, not the generic-secret rule.
+        assert!(
+            capture(
+                &EntityKind::GenericApiKey,
+                "client_secret: aG7xQ92mZk1pLw83"
+            )
+            .is_some()
+        );
+        assert!(capture(&EntityKind::GenericSecret, "secret = aG7xQ92mZk1pLw83").is_some());
+        assert!(
+            capture(
+                &EntityKind::PasswordAssignment,
+                "PGPASSWORD=tr0ub4dor-and-3"
+            )
+            .is_some()
+        );
     }
 
     #[test]

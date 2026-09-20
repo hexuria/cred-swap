@@ -9,6 +9,16 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
+default = ["os-rng"]
+
+# Draws seeds from the operating system, via `Surrogates::random`.
+#
+# Off for wasm32-unknown-unknown, which has no OS entropy source: a browser
+# build gets its seed from `crypto.getRandomValues` on the JavaScript side and
+# passes it in. Turning this off also drops the `getrandom` dependency, which
+# does not build for that target without extra configuration.
+os-rng = ["rand/thread_rng", "rand/os_rng", "rand/std"]
+
 # Exposes `cred_swap_core::fixtures` so other crates' tests can use the same
 # synthetic credential strings.
 fixtures = []
