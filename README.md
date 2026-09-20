@@ -351,10 +351,14 @@ Read this part.
 | `cred-swap-wasm` | Browser bindings, and the demo page. |
 
 ```console
-cargo test --workspace
-cargo clippy --workspace --all-targets --all-features
-wasm-pack test --node crates/cred-swap-wasm
+./scripts/check.sh      # everything CI runs, in the order CI runs it
 ```
+
+Run that before pushing and CI holds no surprises. It exists because the
+interesting failures were all ones a plain `cargo test` could not see: a lint
+only the newest stable knows about, a browser build that compiles the core with
+a feature turned off, a scan that walks tracked files and so cannot see one you
+have not staged yet.
 
 CI runs those on Linux, macOS and Windows, checks the minimum supported Rust
 version, builds the browser package, audits dependencies for advisories, and
