@@ -567,8 +567,12 @@ fn from_hex(text: &str) -> Option<[u8; 32]> {
     if text.len() != 64 {
         return None;
     }
+    let (pairs, remainder) = text.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
     let mut out = [0u8; 32];
-    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (slot, pair) in out.iter_mut().zip(pairs) {
         let hex = std::str::from_utf8(pair).ok()?;
         *slot = u8::from_str_radix(hex, 16).ok()?;
     }

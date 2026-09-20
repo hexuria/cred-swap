@@ -34,4 +34,12 @@ allow = [
   # reserved domain and the password is invented.
   'postgresql://appuser:s3cr3t@db.prod.internal/orders',
   'postgresql://fable:0LrMblzEd2eEz@db.globex.invalid/oldbridge',
+
+  # The demo page's sample prompt. Its whole purpose is to be a paragraph full
+  # of things the tool should catch, so that loading the page shows it working.
+  # AWS publishes the first of these as its documentation example; the other
+  # two are invented.
+  'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+  'postgresql://appuser:s3cr3t-p4ssw0rd@db.prod.internal:5432/orders',
+  'correct-horse-battery',
 ]

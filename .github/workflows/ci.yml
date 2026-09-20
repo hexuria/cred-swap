@@ -13,10 +13,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Warnings are failures here. They are cheap to fix at review time and
-  # expensive to fix once a thousand of them have accumulated.
-  RUSTFLAGS: -D warnings
-  RUSTDOCFLAGS: -D warnings
+
+# Warnings are failures in this repository, but only for this repository's own
+# code. `RUSTFLAGS` is deliberately not set here: it would apply `-D warnings`
+# to every dependency as well, so an upstream crate's deprecation warning would
+# break a build that has nothing to do with it. Lint flags are passed to the
+# individual commands instead.
 
 jobs:
   lint:
@@ -33,15 +35,21 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+      # Run against the current stable rather than a pinned version, so a new
+      # lint shows up as a build to fix rather than never showing up at all.
+      # A failure here after a Rust release is expected and is usually a
+      # one-line change.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Clippy (browser build)
         run: |
           rustup target add wasm32-unknown-unknown
-          cargo clippy -p cred-swap-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p cred-swap-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
       - name: Build the documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --document-private-items
 
   test:
@@ -71,7 +79,11 @@ jobs:
           set -euo pipefail
           export CRED_SWAP_HOME="${RUNNER_TEMP}/cred-swap-ci"
           cargo build --release -p cred-swap-cli
-          BIN=$(ls target/release/cred-swap target/release/cred-swap.exe 2>/dev/null | head -1)
+
+          # Not `ls a b | head -1`: under `pipefail`, `ls` exits non-zero when
+          # either path is missing, which is always the case here.
+          BIN=target/release/cred-swap
+          [ -f "$BIN" ] || BIN=target/release/cred-swap.exe
 
           original='Email dana@corp.com, card 4242 4242 4242 4242, from 198.51.100.7'
           scrubbed=$(printf '%s' "$original" | "$BIN" scrub 2>/dev/null)
@@ -83,7 +95,10 @@ jobs:
             printf 'expected: %s\ngot:      %s\n' "$original" "$restored"
             exit 1
           }
-          echo "$scrubbed" | grep -q 'dana@corp.com' && { echo "the original leaked"; exit 1; }
+          if echo "$scrubbed" | grep -q 'dana@corp.com'; then
+            echo "the original leaked into the scrubbed text"
+            exit 1
+          fi
           echo "scrub and restore round-tripped cleanly"
 
   msrv:
