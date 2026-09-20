@@ -56,8 +56,12 @@ pub enum EntityKind {
     StreetAddress,
     /// A date labelled as someone's date of birth.
     DateOfBirth,
-    /// A national identity number. Currently US Social Security numbers.
+    /// A national identity number: US SSN, UK NINO, Canadian SIN,
+    /// Singapore NRIC or FIN, Indian Aadhaar.
     NationalId,
+    /// A taxpayer identifier: Philippine TIN, US ITIN, Indian PAN,
+    /// Brazilian CPF, Australian ABN, EU VAT number.
+    TaxId,
     /// A passport number, found after a `passport` label.
     PassportNumber,
     /// A driving licence number, found after a licence label.
@@ -135,6 +139,12 @@ pub enum EntityKind {
     GenericSecret,
     /// A value assigned to something named like a password.
     PasswordAssignment,
+    /// A token from a service whose prefix names it: `gsk_`, `shpat_`,
+    /// `dop_v1_` and the rest of the long tail.
+    ///
+    /// One kind rather than forty, because the useful part is the same for all
+    /// of them: the prefix says what it is, and the stand-in keeps it.
+    VendorApiToken,
     /// A long random-looking string with nothing nearby to say what it is.
     ///
     /// Off in every preset but `aggressive`: in source code this fires on
@@ -156,6 +166,7 @@ impl EntityKind {
         Self::StreetAddress,
         Self::DateOfBirth,
         Self::NationalId,
+        Self::TaxId,
         Self::PassportNumber,
         Self::DriversLicense,
         Self::CreditCard,
@@ -191,6 +202,7 @@ impl EntityKind {
         Self::GenericApiKey,
         Self::GenericSecret,
         Self::PasswordAssignment,
+        Self::VendorApiToken,
         Self::HighEntropyString,
     ];
 
@@ -204,6 +216,7 @@ impl EntityKind {
             Self::StreetAddress => "street-address",
             Self::DateOfBirth => "date-of-birth",
             Self::NationalId => "national-id",
+            Self::TaxId => "tax-id",
             Self::PassportNumber => "passport-number",
             Self::DriversLicense => "drivers-license",
             Self::CreditCard => "credit-card",
@@ -239,6 +252,7 @@ impl EntityKind {
             Self::GenericApiKey => "generic-api-key",
             Self::GenericSecret => "generic-secret",
             Self::PasswordAssignment => "password-assignment",
+            Self::VendorApiToken => "vendor-api-token",
             Self::HighEntropyString => "high-entropy-string",
             Self::Custom(label) => label.as_str(),
         }
@@ -268,6 +282,7 @@ impl EntityKind {
             | Self::StreetAddress
             | Self::DateOfBirth
             | Self::NationalId
+            | Self::TaxId
             | Self::PassportNumber
             | Self::DriversLicense => Category::Pii,
 
@@ -309,7 +324,12 @@ impl EntityKind {
         match self {
             Self::SshPrivateKey => 105,
             Self::PrivateKeyBlock => 100,
-            Self::AnthropicKey => 95,
+            // Above the vendor rules below, because both claim the same span
+            // for a token whose prefix begins `sk-`: `sk-ant-...` is also a
+            // valid `sk-...`, and `sk-or-v1-...` is too. Whichever of those is
+            // more specific has to win, and a tie is decided by declaration
+            // order, which is not a decision anyone made.
+            Self::AnthropicKey | Self::VendorApiToken => 95,
             Self::AwsAccessKeyId
             | Self::AwsSecretAccessKey
             | Self::GithubToken
@@ -323,7 +343,7 @@ impl EntityKind {
             | Self::NpmToken => 90,
             Self::JwtToken | Self::DatabaseUrl => 85,
             Self::Custom(_) => 80,
-            Self::CreditCard | Self::Iban | Self::NationalId => 70,
+            Self::CreditCard | Self::Iban | Self::NationalId | Self::TaxId => 70,
             // Above `PhoneNumber`: a dotted quad such as 198.51.100.44 has ten
             // digits and dot separators, so it satisfies the phone rule too.
             // The IPv4 rule is the far stricter of the two — four groups of at
@@ -389,7 +409,7 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(before, names.len(), "duplicate entity kind identifier");
-        assert_eq!(before, 42);
+        assert_eq!(before, 44);
     }
 
     #[test]

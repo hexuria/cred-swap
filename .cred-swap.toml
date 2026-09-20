@@ -29,6 +29,10 @@ allow = [
   'aG7xQ92mZk1pLw83',
   'tr0ub4dor-and-3',
 
+  # The AWS account-id rule's own test fixture. Twelve sequential digits is
+  # nobody's account, and the rule catching it is the rule working.
+  '123456789012',
+
   # The README's worked example. Showing what a connection string looks like
   # going in and coming out is the whole point of that example; the host is a
   # reserved domain and the password is invented.
