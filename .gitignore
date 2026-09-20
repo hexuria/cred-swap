@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Vault files hold every real value next to its stand-in. Never commit one.
+*.cred-swap.json
+/sessions

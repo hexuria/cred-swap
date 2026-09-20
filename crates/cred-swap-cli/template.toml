@@ -1,0 +1,56 @@
+# cred-swap configuration.
+#
+# Everything here is optional. Delete what you do not need; the defaults are
+# chosen so that an empty file behaves sensibly.
+
+# Which set of rules to start from.
+#   standard   - credentials and personal data, skipping rules that fire on prose
+#   secrets    - credentials only, best when the text is source code
+#   aggressive - every rule, including bare URLs and unlabelled random strings
+#   none       - nothing; build up with `enable` below
+policy = "standard"
+
+# What stand-ins look like.
+#   realistic - a plausible value of the same shape, e.g. avery.ashford@globex.example
+#   tagged    - an obvious marker, e.g. [[EMAIL_ADDRESS_1]]
+style = "realistic"
+
+# Which session's vault to use by default. Sessions are independent: stand-ins
+# stay consistent inside one and never leak between them.
+session = "default"
+
+# Turn individual rules on or off. Run `cred-swap kinds` for the full list.
+enable = []
+disable = []
+
+# Strings that must never be replaced, matched exactly and case-insensitively.
+# Use this for the addresses and hosts a reader needs to see verbatim.
+allow = [
+  # "support@example.com",
+]
+
+# Literal strings that must always be replaced, whatever shape they have.
+# This is how you mask things no general pattern could know about: internal
+# codenames, customer names, the one hostname that matters.
+#
+# [[term]]
+# literal = "Project Halcyon"
+# kind = "custom:codename"
+#
+# [[term]]
+# literal = "Northwind Logistics"
+# kind = "custom:customer"
+
+# Your own patterns. `group = 0` replaces the whole match; a higher number
+# replaces just that capture group, which is how you keep a label like
+# `ticket=` in the text while masking the value after it.
+#
+# [[pattern]]
+# label = "employee-id"
+# regex = '\bEMP-\d{6}\b'
+# group = 0
+#
+# [[pattern]]
+# label = "internal-token"
+# regex = 'X-Acme-Token:\s*([A-Za-z0-9]{32})'
+# group = 1
